@@ -117,7 +117,7 @@
 
 ```bash
 # リポジトリをクローン（Git が必要）
-git clone https://github.com/Jwadow/kiro-gateway.git
+git clone https://github.com/like3213934360-lab/kiro2api.git
 cd kiro-gateway
 
 # または ZIP をダウンロード：Code → Download ZIP → 解凍 → kiro-gateway フォルダを開く
@@ -387,7 +387,7 @@ ACCOUNT_SYSTEM=true
 
 ```bash
 # 1. クローンと設定
-git clone https://github.com/Jwadow/kiro-gateway.git
+git clone https://github.com/like3213934360-lab/kiro2api.git
 cd kiro-gateway
 cp .env.example .env
 # .env を認証情報で編集

@@ -116,7 +116,7 @@ Originally by [@Jwadow](https://github.com/jwadow) • Maintained by [@Echoxiawa
 
 ```bash
 # Clone the repository (requires Git)
-git clone https://github.com/Jwadow/kiro-gateway.git
+git clone https://github.com/like3213934360-lab/kiro2api.git
 cd kiro-gateway
 
 # Or download ZIP: Code → Download ZIP → extract → open kiro-gateway folder
@@ -424,7 +424,7 @@ For complete configuration examples (including per-account region settings), see
 
 ```bash
 # 1. Clone and configure
-git clone https://github.com/Jwadow/kiro-gateway.git
+git clone https://github.com/like3213934360-lab/kiro2api.git
 cd kiro-gateway
 cp .env.example .env
 # Edit .env with your credentials

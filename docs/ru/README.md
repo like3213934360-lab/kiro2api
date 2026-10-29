@@ -117,7 +117,7 @@
 
 ```bash
 # Клонируйте репозиторий (требуется Git)
-git clone https://github.com/Jwadow/kiro-gateway.git
+git clone https://github.com/like3213934360-lab/kiro2api.git
 cd kiro-gateway
 
 # Или скачайте ZIP: Code → Download ZIP → распакуйте → откройте папку kiro-gateway
@@ -387,7 +387,7 @@ ACCOUNT_SYSTEM=true
 
 ```bash
 # 1. Клонируйте и настройте
-git clone https://github.com/Jwadow/kiro-gateway.git
+git clone https://github.com/like3213934360-lab/kiro2api.git
 cd kiro-gateway
 cp .env.example .env
 # Отредактируйте .env с вашими учётными данными

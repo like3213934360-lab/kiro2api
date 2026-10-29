@@ -110,7 +110,7 @@
 
 ```bash
 # 저장소 클론 (Git 필요)
-git clone https://github.com/Jwadow/kiro-gateway.git
+git clone https://github.com/like3213934360-lab/kiro2api.git
 cd kiro-gateway
 
 # 또는 ZIP 다운로드: Code → Download ZIP → 압축 해제 → kiro-gateway 폴더 열기
@@ -377,7 +377,7 @@ ACCOUNT_SYSTEM=true
 
 ```bash
 # 1. 클론 및 설정
-git clone https://github.com/Jwadow/kiro-gateway.git
+git clone https://github.com/like3213934360-lab/kiro2api.git
 cd kiro-gateway
 cp .env.example .env
 # .env를 자격 증명으로 편집
