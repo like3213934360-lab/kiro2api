@@ -343,10 +343,9 @@ async function loadCredits() {
       const overageCharges = b.overageCharges;
       if (overageCap !== undefined || currentOverages !== undefined) {
         const unit = b.unit || 'unit';
-        if (currentOverages > 0) {
-          html += `<div class="kv"><span class="k" style="color:var(--warn)">已超额</span><span class="v">${fmtNum(currentOverages)} / ${fmtNum(overageCap)} ${unit} · 费用 $${fmtNum(overageCharges)} @ $${fmtNum(overageRate)}/${unit}</span></div>`;
-        } else if (overageEnabled) {
-          html += `<div class="kv"><span class="k">超额上限</span><span class="v">${fmtNum(overageCap)} ${unit} · $${fmtNum(overageRate)}/${unit}</span></div>`;
+        const overageCls = currentOverages > 0 ? ' style="color:var(--warn)"' : '';
+        if (overageEnabled) {
+          html += `<div class="kv"><span class="k"${overageCls}>已超额</span><span class="v">${fmtNum(currentOverages)} / ${fmtNum(overageCap)} ${unit} · 费用 $${fmtNum(overageCharges)} @ $${fmtNum(overageRate)}/${unit}</span></div>`;
         } else {
           html += `<div class="kv"><span class="k">超额上限</span><span class="v">${fmtNum(overageCap)} ${unit}（未开启）</span></div>`;
         }
