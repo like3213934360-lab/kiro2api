@@ -56,6 +56,9 @@ from kiro.streaming_anthropic import (
     WebSearchContinuationItem,
 )
 from kiro.streaming_core import EmptyKiroResponseError
+from kiro.effort import split_effort_suffix
+from kiro.compaction import AUTO_COMPACT_TOKENS, maybe_compact_request
+from kiro.payload_guards import check_payload_size
 from kiro.http_client import KiroHttpClient
 from kiro.utils import conversation_diagnostic_id, resolve_conversation_id, summarize_cache_prefix
 from kiro.tokenizer import estimate_request_tokens
@@ -145,6 +148,66 @@ def _create_web_search_continuation(
         )
 
     return continue_after_web_search
+
+
+def _context_too_long_response(model: str, estimated: int, maximum: int) -> JSONResponse:
+    """Return Anthropic's standard prompt-too-long error (triggers auto-compact)."""
+    return JSONResponse(
+        status_code=400,
+        content={
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": (
+                    f"prompt is too long: {estimated} tokens > {maximum} maximum"
+                ),
+            },
+        },
+    )
+
+
+def _anthropic_error_type(status_code: int) -> str:
+    """Map an upstream/proxy status to Anthropic's error taxonomy."""
+    if status_code == 400:
+        return "invalid_request_error"
+    if status_code == 401:
+        return "authentication_error"
+    if status_code == 403:
+        return "permission_error"
+    if status_code == 404:
+        return "not_found_error"
+    if status_code == 413:
+        return "request_too_large"
+    if status_code == 429:
+        return "rate_limit_error"
+    if status_code in (503, 529):
+        return "overloaded_error"
+    return "api_error"
+
+
+def _error_response(
+    request: Request,
+    status_code: int,
+    message: str,
+    retry_after: Optional[str] = None,
+) -> JSONResponse:
+    headers = {}
+    request_id = getattr(request.state, "request_id", None)
+    if request_id:
+        headers["x-request-id"] = request_id
+    if retry_after:
+        headers["retry-after"] = retry_after
+    return JSONResponse(
+        status_code=status_code,
+        headers=headers,
+        content={
+            "type": "error",
+            "error": {
+                "type": _anthropic_error_type(status_code),
+                "message": message,
+            },
+        },
+    )
 
 
 async def verify_anthropic_api_key(
@@ -250,7 +313,29 @@ async def messages(
     # Translate client-facing aliases (e.g. "auto-kiro" → "auto") before any payload
     # is built, so Kiro never receives the local alias name.
     request_data.model = apply_model_alias(request_data.model, MODEL_ALIASES)
-    
+    base_model_name, _, _ = split_effort_suffix(request_data.model)
+
+    # Cheap pre-check before any upstream work. If the prompt is already over
+    # the model's context window, return Anthropic's standard 400 so Claude
+    # Code can auto-compact instead of paying for a doomed 300K-token prefill.
+    _messages_for_estimate = [msg.model_dump() for msg in request_data.messages]
+    _tools_for_estimate = (
+        [tool.model_dump() for tool in request_data.tools] if request_data.tools else None
+    )
+    if isinstance(request_data.system, list):
+        _system_for_estimate = [
+            b.model_dump() if hasattr(b, "model_dump") else b
+            for b in request_data.system
+        ]
+    else:
+        _system_for_estimate = request_data.system
+    estimated_input_tokens = estimate_request_tokens(
+        messages=_messages_for_estimate,
+        tools=_tools_for_estimate,
+        system_prompt=_system_for_estimate,
+        apply_claude_correction=False,
+    )["total_tokens"]
+
     if anthropic_version:
         logger.debug(f"Anthropic-Version header: {anthropic_version}")
     
@@ -480,6 +565,12 @@ async def messages(
             model_cache = account.model_cache
             model_resolver = account.model_resolver
 
+            max_input_tokens = model_cache.get_max_input_tokens(base_model_name)
+            if estimated_input_tokens > max_input_tokens - 1024:
+                return _context_too_long_response(
+                    request_data.model, estimated_input_tokens, max_input_tokens
+                )
+
             # Build payload for Kiro
             # profileArn is required by runtime.kiro.dev for all auth types
             profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
@@ -514,6 +605,29 @@ async def messages(
 
             # Cache-hit diagnosis: shows which prefix component changes per turn
             logger.info(f"[CachePrefix] {summarize_cache_prefix(kiro_payload)}")
+
+            # If old tool-result clearing was not enough, summarize the older
+            # turns and rebuild. The client keeps its full history; only this
+            # outbound payload is compacted.
+            payload_tokens = int(check_payload_size(kiro_payload) / 3.5)
+            if payload_tokens > AUTO_COMPACT_TOKENS:
+                compacted = await maybe_compact_request(
+                    request_data,
+                    auth_manager,
+                    conversation_id,
+                    profile_arn_for_payload,
+                    shared_client=request.app.state.http_client,
+                    estimated_tokens=payload_tokens,
+                )
+                if compacted is not None:
+                    request_data = compacted
+                    kiro_payload = anthropic_to_kiro(
+                        request_data, conversation_id, profile_arn_for_payload
+                    )
+                    logger.info(
+                        f"[AutoCompact] payload ~{payload_tokens} tokens -> "
+                        f"~{int(check_payload_size(kiro_payload) / 3.5)} tokens"
+                    )
             
             # Create HTTP client
             url = f"{auth_manager.api_host}/generateAssistantResponse"
@@ -678,15 +792,15 @@ async def messages(
                         if debug_logger:
                             debug_logger.flush_on_error(response.status_code, last_error_message)
                         
-                        return JSONResponse(
-                            status_code=response.status_code,
-                            content={
-                                "type": "error",
-                                "error": {
-                                    "type": "api_error",
-                                    "message": last_error_message
-                                }
-                            }
+                        return _error_response(
+                            request,
+                            response.status_code,
+                            last_error_message,
+                            retry_after=(
+                                "5"
+                                if response.status_code in (429, 503, 529)
+                                else None
+                            ),
                         )
                     
                     else:  # ErrorType.RECOVERABLE
@@ -799,6 +913,12 @@ async def messages(
         auth_manager = account.auth_manager
         model_cache = account.model_cache
         model_resolver = account.model_resolver
+
+        max_input_tokens = model_cache.get_max_input_tokens(base_model_name)
+        if estimated_input_tokens > max_input_tokens - 1024:
+            return _context_too_long_response(
+                request_data.model, estimated_input_tokens, max_input_tokens
+            )
     
     # ==============================================================================
     # Normal Flow (Path B will be intercepted in streaming, or no web_search)
@@ -841,6 +961,26 @@ async def messages(
 
     # Cache-hit diagnosis: shows which prefix component changes per turn
     logger.info(f"[CachePrefix] {summarize_cache_prefix(kiro_payload)}")
+
+    payload_tokens = int(check_payload_size(kiro_payload) / 3.5)
+    if payload_tokens > AUTO_COMPACT_TOKENS:
+        compacted = await maybe_compact_request(
+            request_data,
+            auth_manager,
+            conversation_id,
+            profile_arn_for_payload,
+            shared_client=request.app.state.http_client,
+            estimated_tokens=payload_tokens,
+        )
+        if compacted is not None:
+            request_data = compacted
+            kiro_payload = anthropic_to_kiro(
+                request_data, conversation_id, profile_arn_for_payload
+            )
+            logger.info(
+                f"[AutoCompact] payload ~{payload_tokens} tokens -> "
+                f"~{int(check_payload_size(kiro_payload) / 3.5)} tokens"
+            )
     
     # Create HTTP client with retry logic
     # For streaming: use per-request client to avoid CLOSE_WAIT leak on VPN disconnect (issue #54)
@@ -918,15 +1058,13 @@ async def messages(
                 debug_logger.flush_on_error(response.status_code, error_message)
             
             # Return error in Anthropic format
-            return JSONResponse(
-                status_code=response.status_code,
-                content={
-                    "type": "error",
-                    "error": {
-                        "type": "api_error",
-                        "message": error_message
-                    }
-                }
+            return _error_response(
+                request,
+                response.status_code,
+                error_message,
+                retry_after=(
+                    "5" if response.status_code in (429, 503, 529) else None
+                ),
             )
         
         usage_reporter = make_usage_reporter(request)
@@ -1021,16 +1159,7 @@ async def messages(
         logger.error(f"HTTP 502 - POST /v1/messages - {e}")
         if debug_logger:
             debug_logger.flush_on_error(502, str(e))
-        return JSONResponse(
-            status_code=502,
-            content={
-                "type": "error",
-                "error": {
-                    "type": "api_error",
-                    "message": str(e),
-                },
-            },
-        )
+        return _error_response(request, 502, str(e))
 
     except HTTPException as e:
         await http_client.close()
@@ -1043,7 +1172,8 @@ async def messages(
         logger.error(f"HTTP {e.status_code} - POST /v1/messages - {e.detail}")
         if debug_logger:
             debug_logger.flush_on_error(e.status_code, str(e.detail))
-        raise
+        retry_after = "5" if e.status_code in (429, 503, 529) else None
+        return _error_response(request, e.status_code, str(e.detail), retry_after=retry_after)
     except Exception as e:
         await http_client.close()
         logger.error(f"Internal error: {e}", exc_info=True)
@@ -1051,16 +1181,7 @@ async def messages(
         if debug_logger:
             debug_logger.flush_on_error(500, str(e))
         
-        return JSONResponse(
-            status_code=500,
-            content={
-                "type": "error",
-                "error": {
-                    "type": "api_error",
-                    "message": f"Internal Server Error: {str(e)}"
-                }
-            }
-        )
+        return _error_response(request, 500, f"Internal Server Error: {str(e)}")
 
 
 @router.post("/v1/messages/count_tokens", dependencies=[Depends(verify_anthropic_api_key)])

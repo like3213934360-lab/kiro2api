@@ -2281,6 +2281,138 @@ class TestAnthropicToKiroIntegration:
         user_input = payload["conversationState"]["currentMessage"]["userInputMessage"]
         content = user_input["content"]
         
-        print(f"Checking for <max_thinking_length>6000</max_thinking_length>...")
-        assert "<max_thinking_length>6000</max_thinking_length>" in content
-        assert "<thinking_mode>enabled</thinking_mode>" in content
+        # Effort-capable models now use Kiro's native reasoning instead of
+        # fake <thinking> tags; the client budget is mapped to an effort level.
+        assert payload["additionalModelRequestFields"] == {
+            "output_config": {"effort": "low"}
+        }
+        assert "<max_thinking_length>6000</max_thinking_length>" not in content
+
+
+# ==================================================================================================
+# Native Kiro reasoning effort
+# ==================================================================================================
+
+class TestNativeKiroEffort:
+    def test_model_suffix_sets_effort_field(self):
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5.5-high",
+            max_tokens=1024,
+            messages=[AnthropicMessage(role="user", content="Hello")],
+        )
+
+        with patch(
+            "kiro.converters_anthropic.get_model_id_for_kiro",
+            return_value="claude-opus-5.5",
+        ):
+            payload = anthropic_to_kiro(request, "conv-effort", "arn:aws:test")
+
+        user = payload["conversationState"]["currentMessage"]["userInputMessage"]
+        assert user["modelId"] == "claude-opus-5.5"
+        assert payload["additionalModelRequestFields"] == {
+            "output_config": {"effort": "high"}
+        }
+
+    def test_client_output_config_effort(self):
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5.5",
+            max_tokens=1024,
+            messages=[AnthropicMessage(role="user", content="Hello")],
+            output_config={"effort": "xhigh"},
+        )
+
+        with patch(
+            "kiro.converters_anthropic.get_model_id_for_kiro",
+            return_value="claude-opus-5.5",
+        ):
+            payload = anthropic_to_kiro(request, "conv-effort", "arn:aws:test")
+
+        assert payload["additionalModelRequestFields"] == {
+            "output_config": {"effort": "xhigh"}
+        }
+
+    def test_thinking_budget_maps_to_effort(self):
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5.5",
+            max_tokens=1024,
+            messages=[AnthropicMessage(role="user", content="Hello")],
+            thinking={"type": "enabled", "budget_tokens": 16000},
+        )
+
+        with patch(
+            "kiro.converters_anthropic.get_model_id_for_kiro",
+            return_value="claude-opus-5.5",
+        ):
+            payload = anthropic_to_kiro(request, "conv-effort", "arn:aws:test")
+
+        assert payload["additionalModelRequestFields"] == {
+            "output_config": {"effort": "medium"}
+        }
+        # Native reasoning is used instead of the fake budget tag.
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<max_thinking_length>16000</max_thinking_length>" not in content
+
+
+# ==================================================================================================
+# Tool choice / structured output guidance
+# ==================================================================================================
+
+class TestToolChoiceAndStructuredOutput:
+    def test_tool_choice_adds_guidance(self):
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5.5",
+            messages=[AnthropicMessage(role="user", content="Calculate 12*13")],
+            max_tokens=128,
+            tools=[
+                AnthropicTool(
+                    name="answer",
+                    description="Return the result",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"result": {"type": "integer"}},
+                        "required": ["result"],
+                    },
+                )
+            ],
+            tool_choice={"type": "tool", "name": "answer"},
+            thinking={"type": "disabled"},
+        )
+
+        with patch(
+            "kiro.converters_anthropic.get_model_id_for_kiro",
+            return_value="claude-opus-5.5",
+        ):
+            payload = anthropic_to_kiro(request, "conv-choice", "arn:aws:test")
+
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "structured tool-style answer" in content
+        assert "answer" in content
+        assert "result" in content
+
+    def test_output_config_json_schema_adds_guidance(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "expression": {"type": "string"},
+                "result": {"type": "integer"},
+            },
+            "required": ["expression", "result"],
+        }
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5.5",
+            messages=[AnthropicMessage(role="user", content="Calculate 68*76")],
+            max_tokens=128,
+            output_config={"format": {"type": "json_schema", "schema": schema}},
+        )
+
+        with patch(
+            "kiro.converters_anthropic.get_model_id_for_kiro",
+            return_value="claude-opus-5.5",
+        ):
+            payload = anthropic_to_kiro(request, "conv-json", "arn:aws:test")
+
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "valid JSON object" in content
+        assert "JSON.parse" in content
+        assert "expression" in content
+        assert "additionalModelRequestFields" not in payload

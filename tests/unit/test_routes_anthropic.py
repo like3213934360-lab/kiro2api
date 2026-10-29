@@ -2908,3 +2908,26 @@ class TestAnthropicModelAlias:
         )
         print(f"Comparing: Expected 'claude-sonnet-4-5', Got {model!r}")
         assert model == "claude-sonnet-4-5"
+
+
+class TestAnthropicErrorMapping:
+    def test_status_to_error_type(self):
+        from kiro.routes_anthropic import _anthropic_error_type
+
+        assert _anthropic_error_type(400) == "invalid_request_error"
+        assert _anthropic_error_type(401) == "authentication_error"
+        assert _anthropic_error_type(403) == "permission_error"
+        assert _anthropic_error_type(404) == "not_found_error"
+        assert _anthropic_error_type(429) == "rate_limit_error"
+        assert _anthropic_error_type(503) == "overloaded_error"
+        assert _anthropic_error_type(529) == "overloaded_error"
+        assert _anthropic_error_type(500) == "api_error"
+
+    def test_context_too_long_is_standard_400(self):
+        from kiro.routes_anthropic import _context_too_long_response
+
+        response = _context_too_long_response("claude-opus-5.5", 1_000_001, 1_000_000)
+        assert response.status_code == 400
+        body = json.loads(response.body)
+        assert body["error"]["type"] == "invalid_request_error"
+        assert "prompt is too long" in body["error"]["message"]

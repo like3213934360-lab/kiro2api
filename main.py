@@ -46,6 +46,7 @@ import json
 import logging
 import sys
 import os
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -565,6 +566,16 @@ app = FastAPI(
     version=APP_VERSION,
     lifespan=lifespan
 )
+
+
+@app.middleware("http")
+async def add_request_id(request, call_next):
+    """Expose a stable request id for client-side diagnostics/retries."""
+    request_id = request.headers.get("x-request-id") or f"req_{uuid.uuid4().hex[:24]}"
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["x-request-id"] = request_id
+    return response
 
 
 # --- CORS Middleware ---

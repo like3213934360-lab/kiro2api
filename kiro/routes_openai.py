@@ -42,7 +42,9 @@ from kiro.config import (
     APP_VERSION,
     PROFILE_ARN,
     MODEL_ALIASES,
+    FALLBACK_MODELS,
 )
+from kiro.effort import EFFORT_LEVELS, supports_effort
 from kiro.models_openai import (
     OpenAIModel,
     ModelList,
@@ -286,15 +288,45 @@ async def get_models(request: Request):
         account = request.app.state.account_manager.get_first_account()
         available_model_ids = account.model_resolver.get_available_models()
     
-    # Build OpenAI-compatible model list
-    openai_models = [
-        OpenAIModel(
-            id=model_id,
-            owned_by="anthropic",
-            description="Claude model via Kiro API"
+    # Build OpenAI-compatible model list with context/effort metadata so
+    # clients can compact early and expose per-model thinking levels.
+    limits_by_model = {
+        item["modelId"]: item.get("tokenLimits", {})
+        for item in FALLBACK_MODELS
+    }
+    openai_models = []
+    for model_id in available_model_ids:
+        limits = limits_by_model.get(model_id, {})
+        openai_models.append(
+            OpenAIModel(
+                id=model_id,
+                owned_by="anthropic",
+                description="Claude model via Kiro API",
+                context_window=limits.get("maxInputTokens"),
+                max_input_tokens=limits.get("maxInputTokens"),
+                max_output_tokens=limits.get("maxOutputTokens"),
+                effort_levels=list(EFFORT_LEVELS) if supports_effort(model_id) else None,
+            )
         )
-        for model_id in available_model_ids
-    ]
+
+    # Expose explicit thinking-level variants for the three main Kiro 5.x
+    # models. Picking one pins that effort without any client configuration.
+    for base in ("claude-opus-5.5", "claude-sonnet-5", "claude-haiku-5.5"):
+        if base not in available_model_ids:
+            continue
+        limits = limits_by_model.get(base, {})
+        for level in EFFORT_LEVELS:
+            openai_models.append(
+                OpenAIModel(
+                    id=f"{base}-{level}",
+                    owned_by="anthropic",
+                    description=f"Claude model via Kiro API (thinking: {level})",
+                    context_window=limits.get("maxInputTokens"),
+                    max_input_tokens=limits.get("maxInputTokens"),
+                    max_output_tokens=limits.get("maxOutputTokens"),
+                    effort_levels=[level],
+                )
+            )
     
     return ModelList(data=openai_models)
 

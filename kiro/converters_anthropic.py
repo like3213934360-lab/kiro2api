@@ -31,8 +31,9 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from kiro.config import HIDDEN_MODELS, STRIP_BILLING_HEADER
+from kiro.config import HIDDEN_MODELS, MODEL_EFFORT_DEFAULTS, STRIP_BILLING_HEADER
 from kiro.model_resolver import get_model_id_for_kiro
+from kiro.effort import resolve_effort, split_effort_suffix
 from kiro.mcp_tools import generate_search_summary
 from kiro.models_anthropic import (
     AnthropicMessagesRequest,
@@ -155,6 +156,80 @@ def extract_documents_from_anthropic_content(content: Any) -> str:
                         document_parts.append(_document_block_to_text(item))
 
     return "\n\n".join(document_parts)
+
+
+def build_tool_choice_prompt_addition(request: AnthropicMessagesRequest) -> str:
+    """
+    Translate Anthropic tool_choice semantics into prompt guidance.
+
+    Kiro has no native "must call this tool" switch, so ``tool_choice: any/tool``
+    is emulated by telling the model which tool to use and what schema to obey.
+    """
+    if not request.tool_choice or not request.tools:
+        return ""
+
+    choice = request.tool_choice
+    choice_type = choice.get("type") if isinstance(choice, dict) else getattr(choice, "type", None)
+    tool_name = choice.get("name") if isinstance(choice, dict) else getattr(choice, "name", None)
+
+    if choice_type not in {"any", "tool"}:
+        return ""
+
+    selected_tool = None
+    if choice_type == "tool" and tool_name:
+        for tool in request.tools:
+            name = tool.get("name") if isinstance(tool, dict) else tool.name
+            if name == tool_name:
+                selected_tool = tool
+                break
+    elif request.tools:
+        selected_tool = request.tools[0]
+
+    if selected_tool is None:
+        return ""
+
+    name = selected_tool.get("name") if isinstance(selected_tool, dict) else selected_tool.name
+    schema = (
+        selected_tool.get("input_schema")
+        if isinstance(selected_tool, dict)
+        else selected_tool.input_schema
+    )
+    return (
+        "\n\nThe client requires a structured tool-style answer. "
+        f"Use the tool named `{name}` and provide arguments that strictly satisfy "
+        "this JSON schema. Do not include prose outside the structured answer.\n"
+        f"Schema: {schema}"
+    )
+
+
+def extract_json_schema_output_config(
+    request: AnthropicMessagesRequest,
+) -> Optional[Dict[str, Any]]:
+    """Return output_config.format.schema when the client asks for JSON output."""
+    output_config = getattr(request, "output_config", None)
+    if not isinstance(output_config, dict):
+        return None
+
+    fmt = output_config.get("format")
+    if not isinstance(fmt, dict) or fmt.get("type") != "json_schema":
+        return None
+
+    schema = fmt.get("schema")
+    return schema if isinstance(schema, dict) else None
+
+
+def build_json_schema_prompt_addition(schema: Optional[Dict[str, Any]]) -> str:
+    """Prompt guidance for Anthropic structured (JSON schema) output."""
+    if not schema:
+        return ""
+
+    return (
+        "\n\nThe client requires a structured JSON response. "
+        "Return exactly one valid JSON object that strictly satisfies this JSON schema. "
+        "Do not include markdown fences, prose, comments, analysis, tool calls, or extra text. "
+        "The entire assistant response must be parseable by JSON.parse.\n"
+        f"JSON schema: {schema}"
+    )
 
 
 def convert_anthropic_content_to_text(content: Any) -> str:
@@ -731,12 +806,37 @@ def anthropic_to_kiro(
     # It can be a string or list of content blocks (for prompt caching)
     system_prompt = extract_system_prompt(request.system)
 
+    # Kiro has no native tool_choice enforcement or JSON-schema output mode,
+    # so translate those client requirements into explicit prompt guidance.
+    system_prompt += build_tool_choice_prompt_addition(request)
+    json_schema = extract_json_schema_output_config(request)
+    system_prompt += build_json_schema_prompt_addition(json_schema)
+
     # Get model ID for Kiro API (normalizes + resolves hidden models)
-    # Pass-through principle: we normalize and send to Kiro, Kiro decides if valid
-    model_id = get_model_id_for_kiro(request.model, HIDDEN_MODELS)
+    # Pass-through principle: we normalize and send to Kiro, Kiro decides if valid.
+    # A name like claude-opus-5.5-high carries an effort suffix, not a model id.
+    base_model_name, _, _ = split_effort_suffix(request.model)
+    model_id = get_model_id_for_kiro(base_model_name, HIDDEN_MODELS)
 
     # Extract thinking configuration from thinking parameter
     thinking_config = extract_thinking_config_from_anthropic(request)
+
+    # Native Kiro reasoning effort. When the model supports it, prefer Kiro's
+    # real reasoning stream over the fake <thinking> tag injection.
+    effort = resolve_effort(
+        request.model,
+        model_id,
+        output_config=getattr(request, "output_config", None),
+        thinking=request.thinking,
+        default_effort=MODEL_EFFORT_DEFAULTS.get(model_id),
+    )
+    if json_schema:
+        # Structured output must be pure JSON; thinking text would break it.
+        thinking_config = ThinkingConfig(enabled=False, budget_tokens=None)
+        effort = None
+    elif effort:
+        thinking_config = ThinkingConfig(enabled=False, budget_tokens=None)
+        logger.debug(f"Using native Kiro reasoning effort: {effort} (model={model_id})")
 
     logger.debug(
         f"Converting Anthropic request: model={request.model} -> {model_id}, "
@@ -754,6 +854,7 @@ def anthropic_to_kiro(
         conversation_id=conversation_id,
         profile_arn=profile_arn,
         thinking_config=thinking_config,
+        effort=effort,
     )
 
     return result.payload

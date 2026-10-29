@@ -263,6 +263,18 @@ MODEL_ALIASES: Dict[str, str] = {
     "auto-kiro": "auto",  # Default alias to avoid Cursor's "auto" model conflict
 }
 
+# Per-model native Kiro reasoning effort defaults (the "thinking level" the
+# Kiro IDE exposes). The gateway applies these automatically; clients can still
+# override per request with a model suffix (-low/-medium/-high/-xhigh/-max) or
+# output_config.effort. Set a value to an empty string to leave the model at
+# Kiro's own default.
+MODEL_EFFORT_DEFAULTS: Dict[str, str] = {
+    "claude-opus-5.5": os.getenv("MODEL_EFFORT_OPUS_5_5", "high"),
+    "claude-sonnet-5": os.getenv("MODEL_EFFORT_SONNET_5", "medium"),
+    "claude-sonnet-5.5": os.getenv("MODEL_EFFORT_SONNET_5_5", "medium"),
+    "claude-haiku-5.5": os.getenv("MODEL_EFFORT_HAIKU_5_5", "low"),
+}
+
 # Models to hide from /v1/models endpoint.
 # These models still work when requested directly, but are not shown in the model list.
 # This is useful when you want to show only aliases instead of original model names.

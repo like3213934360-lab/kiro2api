@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
+from kiro.effort import build_effort_fields
 from kiro.config import (
     TOOL_DESCRIPTION_MAX_LENGTH,
     FAKE_REASONING_ENABLED,
@@ -1670,7 +1671,8 @@ def build_kiro_payload(
     tools: Optional[List[UnifiedTool]],
     conversation_id: str,
     profile_arn: str,
-    thinking_config: ThinkingConfig
+    thinking_config: ThinkingConfig,
+    effort: Optional[str] = None,
 ) -> KiroPayloadResult:
     """
     Builds complete payload for Kiro API from unified data.
@@ -1686,6 +1688,7 @@ def build_kiro_payload(
         conversation_id: Unique conversation ID
         profile_arn: AWS CodeWhisperer profile ARN
         thinking_config: Thinking configuration from API adapter
+        effort: Optional Kiro native reasoning effort (low/medium/high/xhigh/max)
     
     Returns:
         KiroPayloadResult with payload and tool documentation
@@ -1849,6 +1852,11 @@ def build_kiro_payload(
     # Add profileArn
     if profile_arn:
         payload["profileArn"] = profile_arn
+
+    # Native Kiro reasoning effort (Kiro SDK field). The adapter resolves the
+    # level from the model suffix, output_config.effort or thinking budget.
+    if effort:
+        payload["additionalModelRequestFields"] = build_effort_fields(model_id, effort)
 
     # Automatic context pruning: old tool outputs are shortened once the
     # conversation gets large, keeping the recent turns intact and valid.
