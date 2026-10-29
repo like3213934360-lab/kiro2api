@@ -180,6 +180,17 @@
 
     </div><!-- /grid2 -->
 
+    <!-- 模型与思考等级 -->
+    <div class="card">
+      <div class="card-hdr">
+        <h2>模型与思考等级</h2>
+        <button class="sm ghost" onclick="loadModels()">刷新</button>
+      </div>
+      <div class="hint" style="margin-bottom:8px">默认值来自 Anthropic 官方（Opus 5.5 / Haiku 5.5 = medium，Sonnet 5.x = high）；请求里用 <b>-low/-medium/-high/-xhigh/-max</b> 后缀或 <b>output_config.effort</b> 可覆盖。</div>
+      <div id="modelsBody"></div>
+      <div class="msg" id="modelsMsg"></div>
+    </div>
+
     <!-- 账号概览 -->
     <div class="card">
       <div class="card-hdr">
@@ -220,7 +231,7 @@ async function login() {
   if (ok) {
     document.getElementById('loginCard').classList.add('hidden');
     document.getElementById('mainPanel').classList.remove('hidden');
-    fillUsageBox(); loadKeys(); loadOverview();
+    fillUsageBox(); loadKeys(); loadModels(); loadOverview();
   } else {
     show('loginMsg', (data.detail && data.detail.detail) || data.detail || '登录失败', false);
   }
@@ -460,6 +471,28 @@ async function deleteKey(key) {
   if (ok) loadKeys(); else show('keysMsg', typeof data.detail==='string' ? data.detail : '操作失败', false);
 }
 
+// ---- Models / effort ----
+async function loadModels() {
+  const { ok, data } = await api('/admin/models');
+  if (!ok) { show('modelsMsg', typeof data.detail==='string' ? data.detail : '加载失败', false); return; }
+  const rows = data.models || [];
+  let html = '<div class="ov-row" style="font-size:11px;color:var(--muted)">' +
+    '<span class="ov-id">模型</span><span style="width:80px">默认</span><span style="width:120px">上下文</span><span>可选等级</span></div>';
+  for (const m of rows) {
+    const levels = (m.effort_levels||[]).length ? m.effort_levels.join(' / ') : '—';
+    const def = m.default_effort ? `<span class="badge ok">${m.default_effort}</span>` : '<span style="color:var(--muted)">Kiro 默认</span>';
+    html += `<div class="ov-row">
+      <span class="ov-id">${m.id}</span>
+      <span style="width:80px">${def}</span>
+      <span style="width:120px">${m.context_window ? fmtNum(m.context_window) + ' tok' : '—'}</span>
+      <span style="font-size:11px;color:var(--muted)">${levels}</span>
+    </div>`;
+  }
+  if (!rows.length) html = '<span style="color:var(--muted);font-size:12px">无模型</span>';
+  document.getElementById('modelsBody').innerHTML = html;
+  show('modelsMsg', '已更新 ' + new Date().toLocaleTimeString(), true);
+}
+
 // ---- Overview ----
 async function loadOverview() {
   const { ok, data } = await api('/admin/overview');
@@ -489,7 +522,7 @@ fetch('/admin/keys').then(r => {
   if (r.ok) {
     document.getElementById('loginCard').classList.add('hidden');
     document.getElementById('mainPanel').classList.remove('hidden');
-    fillUsageBox(); loadKeys(); loadOverview();
+    fillUsageBox(); loadKeys(); loadModels(); loadOverview();
   }
 });
 </script>

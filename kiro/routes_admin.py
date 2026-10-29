@@ -49,7 +49,10 @@ from kiro.config import (
     PROXY_API_KEY,
     ADMIN_PASSWORD,
     CREDITS_QUERY_LIMIT,
+    FALLBACK_MODELS,
+    MODEL_EFFORT_DEFAULTS,
 )
+from kiro.effort import EFFORT_LEVELS, supports_effort
 from kiro.routes_openai import verify_api_key, extract_bearer_key
 from kiro.credits import credits_service
 
@@ -370,6 +373,33 @@ async def admin_overview(request: Request):
         "accounts": accounts,
         "keys": keys,
         "accountSystem": getattr(request.app.state, "account_system", False),
+    }
+
+
+@router.get("/admin/models", dependencies=[Depends(require_admin)])
+async def admin_models(request: Request):
+    """Model catalog with context limits and the gateway's default effort."""
+    rows = []
+    for item in FALLBACK_MODELS:
+        model_id = item.get("modelId", "")
+        if not model_id:
+            continue
+        limits = item.get("tokenLimits", {})
+        rows.append(
+            {
+                "id": model_id,
+                "context_window": limits.get("maxInputTokens"),
+                "max_output_tokens": limits.get("maxOutputTokens"),
+                "default_effort": MODEL_EFFORT_DEFAULTS.get(model_id) or None,
+                "effort_levels": (
+                    list(EFFORT_LEVELS) if supports_effort(model_id) else []
+                ),
+            }
+        )
+    rows.sort(key=lambda row: row["id"])
+    return {
+        "models": rows,
+        "defaults": dict(MODEL_EFFORT_DEFAULTS),
     }
 
 
