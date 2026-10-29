@@ -51,6 +51,7 @@ from kiro.config import (
     CREDITS_QUERY_LIMIT,
     FALLBACK_MODELS,
     MODEL_EFFORT_DEFAULTS,
+    SERVER_HOST,
 )
 from kiro.effort import EFFORT_LEVELS, supports_effort
 from kiro.effort_store import (
@@ -459,17 +460,34 @@ async def admin_set_model_effort(request: Request):
 
 @router.get("/admin/server-addr", dependencies=[Depends(require_admin)])
 async def admin_server_addr(request: Request):
-    """Return the server's actual LAN IP and port so the admin page can build a copyable Base URL."""
+    """Return local/OpenAI/Anthropic base URLs for the admin page.
+
+    Anthropic clients (Claude Code) append ``/v1/messages`` themselves, so
+    their base URL must NOT include ``/v1``. OpenAI-compatible clients do
+    expect ``/v1``. Returning both avoids the classic ``/v1/v1/messages`` 404.
+    """
     import socket
-    port = request.url.port or 8001
+    port = request.url.port or 8000
+    local_base = f"http://127.0.0.1:{port}"
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
+        detected_ip = s.getsockname()[0]
         s.close()
     except Exception:
-        ip = request.url.hostname or "127.0.0.1"
-    return {"baseUrl": f"http://{ip}:{port}/v1", "ip": ip, "port": port}
+        detected_ip = request.url.hostname or "127.0.0.1"
+
+    return {
+        "baseUrl": local_base + "/v1",          # backwards-compatible field
+        "openaiBaseUrl": local_base + "/v1",
+        "anthropicBaseUrl": local_base,
+        "localBaseUrl": local_base,
+        "lanBaseUrl": f"http://{detected_ip}:{port}",
+        "ip": detected_ip,
+        "port": port,
+        "listenHost": SERVER_HOST,
+        "localOnly": SERVER_HOST in ("127.0.0.1", "localhost"),
+    }
 
 
 # ==================================================================================================

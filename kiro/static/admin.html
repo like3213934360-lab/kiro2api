@@ -164,7 +164,7 @@
 
         <div class="card">
           <h2>调用方式</h2>
-          <div class="hint" style="margin-bottom:8px">点击右侧 Key 列表中的<b>「说明」</b>，可一键复制含完整地址和 Key 的使用说明，直接发给对方。</div>
+          <div class="hint" style="margin-bottom:8px">点击右侧 Key 列表中的<b>「说明」</b>，可一键复制完整配置。<br>Claude Code / Anthropic 的 Base URL <b>不要带 /v1</b>；OpenAI / Codex 用带 /v1 的地址。</div>
           <pre id="usageBox"></pre>
         </div>
       </div>
@@ -209,6 +209,7 @@
 <script>
 let keysCache = [];
 let _cachedBaseUrl = null;
+let _cachedBaseInfo = null;
 
 function show(id, text, ok) {
   const el = document.getElementById(id);
@@ -395,28 +396,49 @@ async function loadKeys() {
   show('keysMsg', '共 ' + keysCache.length + ' 个 key', true);
 }
 
-async function getBaseUrl() {
-  if (_cachedBaseUrl) return _cachedBaseUrl;
+async function getBaseInfo() {
+  if (_cachedBaseInfo) return _cachedBaseInfo;
   try {
     const r = await fetch('/admin/server-addr');
-    if (r.ok) { const d = await r.json(); _cachedBaseUrl = d.baseUrl; return d.baseUrl; }
+    if (r.ok) { _cachedBaseInfo = await r.json(); return _cachedBaseInfo; }
   } catch(e) {}
-  _cachedBaseUrl = window.location.origin + '/v1';
-  return _cachedBaseUrl;
+  const origin = window.location.origin;
+  _cachedBaseInfo = {
+    openaiBaseUrl: origin + '/v1',
+    anthropicBaseUrl: origin,
+    localBaseUrl: origin,
+    lanBaseUrl: origin,
+    localOnly: true
+  };
+  return _cachedBaseInfo;
+}
+
+async function getBaseUrl() {
+  const info = await getBaseInfo();
+  return info.openaiBaseUrl;
 }
 
 async function fillUsageBox() {
-  const base = await getBaseUrl();
+  const info = await getBaseInfo();
+  const anth = info.anthropicBaseUrl;
+  const openai = info.openaiBaseUrl;
   document.getElementById('usageBox').textContent =
-    'Base URL:  ' + base + '\n' +
-    'API Key:   <点击右侧「说明」按钮获取>\n\n' +
-    '支持接口:\n' +
-    '  ' + base + '/chat/completions  (OpenAI)\n' +
-    '  ' + base + '/messages          (Anthropic)\n' +
-    '  ' + base + '/responses         (Codex CLI)\n' +
-    '  ' + base + '/models\n' +
-    '  ' + base + '/credits';
+    'Claude Code / Anthropic SDK:\n' +
+    '  ANTHROPIC_BASE_URL  = ' + anth + '\n' +
+    '  ANTHROPIC_AUTH_TOKEN = <点击右侧「说明」按钮获取>\n\n' +
+    'OpenAI SDK / Codex CLI:\n' +
+    '  Base URL = ' + openai + '\n\n' +
+    '支持接口（单一路径）:\n' +
+    '  POST /v1/messages           (Anthropic / Claude Code)\n' +
+    '  POST /v1/chat/completions   (OpenAI)\n' +
+    '  POST /v1/responses          (Codex CLI)\n' +
+    '  GET  /v1/models\n' +
+    '  GET  /v1/credits\n\n' +
+    (info.localOnly
+      ? '当前仅监听 127.0.0.1；本机使用上面的地址即可。\n其他设备需要 SERVER_HOST=0.0.0.0。'
+      : '局域网地址：' + info.lanBaseUrl + '（Claude Code 不带 /v1）');
 }
+
 
 function copyKey(key) {
   navigator.clipboard.writeText(key)
@@ -425,22 +447,30 @@ function copyKey(key) {
 }
 
 async function copyInstructions(key, name) {
-  const base = await getBaseUrl();
+  const info = await getBaseInfo();
+  const anth = info.anthropicBaseUrl;
+  const openai = info.openaiBaseUrl;
   const text =
     'Kiro Gateway 使用说明' + (name ? ' (' + name + ')' : '') + '\n\n' +
-    'Base URL:   ' + base + '\n' +
-    'API Key:    ' + key + '\n\n' +
-    '客户端配置:\n' +
-    '  Base URL      → ' + base + '\n' +
-    '  Authorization → Bearer ' + key + '\n\n' +
-    '支持接口:\n' +
-    '  /v1/chat/completions  (OpenAI 格式)\n' +
-    '  /v1/messages          (Anthropic 格式)\n' +
-    '  /v1/responses         (Codex CLI)\n' +
-    '  /v1/models\n' +
-    '  /v1/credits           (查询 Credits 用量)\n\n' +
-    '快速测试:\n' +
-    '  curl ' + base + '/models -H "Authorization: Bearer ' + key + '"';
+    'API Key: ' + key + '\n\n' +
+    '=== Claude Code / Anthropic SDK ===\n' +
+    'ANTHROPIC_BASE_URL=' + anth + '\n' +
+    'ANTHROPIC_AUTH_TOKEN=' + key + '\n' +
+    '（注意：这里不要带 /v1，SDK 会自己拼 /v1/messages）\n\n' +
+    '=== OpenAI SDK / Codex CLI ===\n' +
+    'Base URL: ' + openai + '\n' +
+    'API Key:  ' + key + '\n\n' +
+    '=== HTTP 接口 ===\n' +
+    'POST /v1/messages            (Anthropic / Claude Code)\n' +
+    'POST /v1/chat/completions    (OpenAI)\n' +
+    'POST /v1/responses           (Codex CLI)\n' +
+    'GET  /v1/models\n' +
+    'GET  /v1/credits\n\n' +
+    '=== 快速测试 ===\n' +
+    'curl ' + openai + '/models -H "Authorization: Bearer ' + key + '"\n' +
+    'curl ' + anth + '/v1/messages -H "x-api-key: ' + key + '" \\\n' +
+    '  -H "Content-Type: application/json" \\\n' +
+    '  -d \'{"model":"claude-opus-5.5","max_tokens":32,"messages":[{"role":"user","content":"Say OK"}]}\'';
   navigator.clipboard.writeText(text)
     .then(()  => show('keysMsg', (name||key.slice(0,14)+'...') + ' 使用说明已复制', true))
     .catch(()=> show('keysMsg', '复制失败，请在 HTTPS 或 localhost 下使用', false));
