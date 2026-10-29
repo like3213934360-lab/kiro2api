@@ -263,7 +263,30 @@ async def stream_kiro_to_anthropic(
             }
         })
         
-        async for event in parse_kiro_stream(response, first_token_timeout):
+        # Scale the first-token timeout with the prompt size. A 300K-token
+        # request can legitimately take tens of seconds to start; retrying it
+        # with the fixed 15s default wastes an entire prefill (and credits).
+        effective_first_token_timeout = first_token_timeout
+        if request_messages:
+            approx_chars = 0
+            for message in request_messages:
+                if isinstance(message, dict):
+                    approx_chars += len(str(message.get("content", "")))
+                else:
+                    approx_chars += len(str(message))
+            approx_tokens = approx_chars // 4
+            effective_first_token_timeout = min(
+                90.0,
+                max(first_token_timeout, 15.0 + approx_tokens / 10_000.0),
+            )
+            if effective_first_token_timeout > first_token_timeout:
+                logger.debug(
+                    f"[AdaptiveTimeout] first token timeout "
+                    f"{first_token_timeout:.0f}s -> {effective_first_token_timeout:.1f}s "
+                    f"(~{approx_tokens} prompt tokens)"
+                )
+
+        async for event in parse_kiro_stream(response, effective_first_token_timeout):
             if event.type == "content":
                 content = event.content or ""
                 full_content += content

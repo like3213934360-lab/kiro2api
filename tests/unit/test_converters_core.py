@@ -16,6 +16,7 @@ import pytest
 from unittest.mock import patch
 
 from kiro.converters_core import (
+    auto_prune_context,
     extract_text_content,
     extract_images_from_content,
     convert_images_to_kiro_format,
@@ -6830,3 +6831,90 @@ class TestBuildKiroPayloadWithThinkingConfig:
         print(f"Checking for <max_thinking_length>7000</max_thinking_length> in content...")
         assert "<max_thinking_length>7000</max_thinking_length>" in content
         assert "<thinking_mode>enabled</thinking_mode>" in content
+
+# ==================================================================================================
+# Automatic context pruning
+# ==================================================================================================
+
+class TestAutoPruneContext:
+    """Old tool outputs are shortened automatically when the session grows."""
+
+    def test_shortens_only_old_tool_results(self, monkeypatch):
+        import kiro.converters_core as cc
+
+        monkeypatch.setattr(cc, "AUTO_CONTEXT_PRUNE_TOKENS", 1000)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS", 2)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_OLD_TOOL_RESULT_CHARS", 200)
+
+        def result(tool_id, text):
+            return {
+                "content": [{"text": text}],
+                "status": "success",
+                "toolUseId": tool_id,
+            }
+
+        payload = {
+            "conversationState": {
+                "history": [
+                    {"userInputMessage": {"userInputMessageContext": {"toolResults": [
+                        result(f"old-{i}", f"result-{i}-" + "X" * 2000)
+                    ]}}}
+                    for i in range(5)
+                ],
+                "currentMessage": {"userInputMessage": {"content": "continue"}},
+            }
+        }
+
+        removed = auto_prune_context(payload)
+        assert removed > 0
+
+        history = payload["conversationState"]["history"]
+        for index, entry in enumerate(history):
+            tool_result = entry["userInputMessage"]["userInputMessageContext"]["toolResults"][0]
+            text = tool_result["content"][0]["text"]
+            if index < 3:
+                assert "automatically shortened" in text
+                assert len(text) < 1000
+            else:
+                assert text.endswith("X" * 100)
+            assert tool_result["status"] == "success"
+            assert tool_result["toolUseId"] == f"old-{index}"
+
+    def test_deduplicates_identical_outputs(self, monkeypatch):
+        import kiro.converters_core as cc
+
+        monkeypatch.setattr(cc, "AUTO_CONTEXT_PRUNE_TOKENS", 100)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS", 1)
+
+        same = "duplicate output " * 500
+        payload = {
+            "conversationState": {
+                "history": [
+                    {"userInputMessage": {"userInputMessageContext": {"toolResults": [
+                        {"content": [{"text": same}], "status": "success", "toolUseId": "a"},
+                        {"content": [{"text": same}], "status": "success", "toolUseId": "b"},
+                        {"content": [{"text": "recent"}], "status": "success", "toolUseId": "c"},
+                    ]}}}
+                ],
+                "currentMessage": {"userInputMessage": {"content": "continue"}},
+            }
+        }
+
+        auto_prune_context(payload)
+        results = payload["conversationState"]["history"][0]["userInputMessage"]["userInputMessageContext"]["toolResults"]
+        assert results[0]["content"][0]["text"] != same
+        assert results[1]["content"][0]["text"] == "[duplicate tool output omitted automatically]"
+        assert results[2]["content"][0]["text"] == "recent"
+
+    def test_small_payload_is_untouched(self):
+        payload = {
+            "conversationState": {
+                "history": [{"userInputMessage": {"userInputMessageContext": {"toolResults": [
+                    {"content": [{"text": "short"}], "status": "success", "toolUseId": "x"}
+                ]}}}],
+                "currentMessage": {"userInputMessage": {"content": "hello"}},
+            }
+        }
+        before = repr(payload)
+        assert auto_prune_context(payload) == 0
+        assert repr(payload) == before

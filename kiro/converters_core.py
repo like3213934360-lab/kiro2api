@@ -30,6 +30,7 @@ The core layer provides a unified interface that API-specific adapters use
 to convert their formats to Kiro API format.
 """
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -60,6 +61,22 @@ from kiro.payload_guards import check_payload_size, trim_payload_to_limit
 # replaced the older "[System: ...]" placeholders precisely because those leaked into `content`
 # and the model started repeating them on subsequent turns.
 EMPTY_CONTENT_PLACEHOLDER = "."
+
+
+# Automatic context pruning (no user configuration required).
+#
+# Agent sessions (Claude Code and similar) re-send the whole conversation on
+# every tool call. Old command/file outputs dominate that prompt and make the
+# upstream prefill slower on every turn. Once the payload exceeds this token
+# estimate, older tool results are shortened (first/last chunk kept) while the
+# most recent ones stay intact, so the model still has the context it is
+# actively working with.
+AUTO_CONTEXT_PRUNE_TOKENS = 220_000
+AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS = 8
+AUTO_PRUNE_OLD_TOOL_RESULT_CHARS = 2_000
+AUTO_PRUNE_MARKER = (
+    "\n...[older tool output automatically shortened to keep this session fast]...\n"
+)
 
 
 # ==================================================================================================
@@ -1559,6 +1576,88 @@ def build_kiro_history(messages: List[UnifiedMessage], model_id: str) -> List[Di
 # Main Payload Building
 # ==================================================================================================
 
+def auto_prune_context(payload: Dict[str, Any]) -> int:
+    """
+    Shortens old tool results when a conversation grows very large.
+
+    This runs automatically; no environment variable or user action is needed.
+    It only touches tool results in ``history`` (never the current turn), keeps
+    the most recent results untouched, deduplicates repeated outputs and keeps
+    the head/tail of old ones. Tool-use IDs, statuses and ordering are preserved
+    so the Kiro payload stays valid.
+
+    Args:
+        payload: Kiro payload produced by build_kiro_payload()
+
+    Returns:
+        Number of characters removed (0 when nothing was pruned)
+    """
+    state = payload.get("conversationState") or {}
+    history = state.get("history") or []
+    if not history:
+        return 0
+
+    # Collect history tool results oldest-first. Current-message results are
+    # never pruned: that is the output the model is about to reason about.
+    slots: List[Dict[str, Any]] = []
+    for entry in history:
+        user_msg = entry.get("userInputMessage") or {}
+        context = user_msg.get("userInputMessageContext") or {}
+        for tool_result in context.get("toolResults") or []:
+            if isinstance(tool_result, dict):
+                slots.append(tool_result)
+
+    if not slots:
+        return 0
+
+    # Fast estimate: serialized bytes / 3.5 approximates tokens well enough
+    # for a pruning decision and avoids running a tokenizer on every turn.
+    estimated_tokens = int(check_payload_size(payload) / 3.5)
+    if estimated_tokens <= AUTO_CONTEXT_PRUNE_TOKENS:
+        return 0
+
+    prunable = slots[:-AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS] if len(slots) > AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS else []
+    if not prunable:
+        return 0
+
+    removed = 0
+    pruned_count = 0
+    seen: set = set()
+
+    for tool_result in prunable:
+        for part in tool_result.get("content") or []:
+            if not isinstance(part, dict):
+                continue
+            # Kiro tool-result parts are usually {"text": ...} without a
+            # "type" key; accept both shapes.
+            if part.get("type") not in (None, "text"):
+                continue
+            text = part.get("text")
+            if not isinstance(text, str) or not text:
+                continue
+
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            if digest in seen:
+                replacement = "[duplicate tool output omitted automatically]"
+            else:
+                seen.add(digest)
+                if len(text) <= AUTO_PRUNE_OLD_TOOL_RESULT_CHARS:
+                    continue
+                half = AUTO_PRUNE_OLD_TOOL_RESULT_CHARS // 2
+                replacement = text[:half] + AUTO_PRUNE_MARKER + text[-half:]
+
+            removed += max(0, len(text) - len(replacement))
+            pruned_count += 1
+            part["text"] = replacement
+
+    if pruned_count:
+        logger.info(
+            f"[AutoPrune] context ~{estimated_tokens} tokens > {AUTO_CONTEXT_PRUNE_TOKENS}; "
+            f"shortened {pruned_count} old tool result(s), freed ~{removed // 4} tokens"
+        )
+    return removed
+
+
 def build_kiro_payload(
     messages: List[UnifiedMessage],
     system_prompt: str,
@@ -1745,6 +1844,10 @@ def build_kiro_payload(
     # Add profileArn
     if profile_arn:
         payload["profileArn"] = profile_arn
+
+    # Automatic context pruning: old tool outputs are shortened once the
+    # conversation gets large, keeping the recent turns intact and valid.
+    auto_prune_context(payload)
 
     # Payload size guard — auto-trim if enabled
     if AUTO_TRIM_PAYLOAD:

@@ -2084,3 +2084,37 @@ class TestStreamingAnthropicKeepalive:
         assert not any(c.startswith("event: ping") for c in chunks)
         assert any("tool_use" in c for c in chunks)
         print("✓ No ping events when disabled")
+
+
+# ==================================================================================================
+# Adaptive first-token timeout
+# ==================================================================================================
+
+class TestAdaptiveFirstTokenTimeout:
+    """Large prompts automatically get a longer first-token timeout."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_scales_with_prompt_size(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        captured = {}
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            captured["timeout"] = args[1] if len(args) > 1 else kwargs.get("first_token_timeout")
+            return
+            yield  # make it a generator
+
+        messages = [{"role": "user", "content": "x" * 800_000}]
+
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_parse_kiro_stream):
+            async for _ in stream_kiro_to_anthropic(
+                mock_response,
+                "claude-sonnet-4",
+                mock_model_cache,
+                mock_auth_manager,
+                request_messages=messages,
+            ):
+                pass
+
+        assert captured["timeout"] > 15.0
+        assert captured["timeout"] <= 90.0
