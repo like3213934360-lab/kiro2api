@@ -1,7 +1,27 @@
 #!/bin/bash
-# 启动 Kiro Gateway（后台运行，日志写入 server.log）
+# 启动 Kiro Gateway（优先使用 macOS LaunchAgent，其次后台运行）
 cd "$(dirname "$0")" || exit 1
+
+LABEL="com.kiro.gateway"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+UID_NUM="$(id -u)"
 PID_FILE="gateway.pid"
+
+if [ -f "$PLIST" ]; then
+  if launchctl print "gui/$UID_NUM/$LABEL" >/dev/null 2>&1; then
+    launchctl kickstart -k "gui/$UID_NUM/$LABEL"
+  else
+    launchctl bootstrap "gui/$UID_NUM" "$PLIST"
+  fi
+  sleep 3
+  if curl -s -m 3 http://127.0.0.1:8000/health >/dev/null 2>&1; then
+    echo "已通过 launchd 启动（PID $(launchctl print "gui/$UID_NUM/$LABEL" 2>/dev/null | awk '/pid =/{print $3; exit}')）"
+    echo "地址：http://127.0.0.1:8000   管理后台：http://127.0.0.1:8000/admin"
+    exit 0
+  fi
+  echo "launchd 启动可能失败，请查看：$(pwd)/server.log"
+  exit 1
+fi
 
 if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   echo "Kiro Gateway 已经在运行（PID $(cat "$PID_FILE")）：http://127.0.0.1:8000"
