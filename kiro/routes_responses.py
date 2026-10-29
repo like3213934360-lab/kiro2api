@@ -258,6 +258,7 @@ async def responses(request: Request, request_data: ResponsesRequest):
                 raise HTTPException(status_code=503, detail=detail)
 
             tried_accounts.add(account.id)
+            request.state.request_log_account = account.id
 
             auth_manager = account.auth_manager
             model_cache = account.model_cache
@@ -399,6 +400,7 @@ async def responses(request: Request, request_data: ResponsesRequest):
     # LEGACY MODE: Single Account (no failover)
     # ==============================================================================
     account = request.app.state.account_manager.get_first_account()
+    request.state.request_log_account = account.id
     if not account.auth_manager:
         logger.error("No initialized accounts available (legacy mode)")
         raise HTTPException(503, "No initialized accounts available")

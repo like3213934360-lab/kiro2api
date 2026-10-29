@@ -55,10 +55,18 @@
   .badge.bad { background: rgba(255,107,107,.15); color: var(--err); }
   .badge.warn{ background: rgba(255,180,84,.15);  color: var(--warn); }
   .effort-select { width: auto; padding: 3px 8px; font-size: 11px; margin: 0; border-radius: 6px; }
-  .logs { max-height: 360px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .log-row { display: grid; grid-template-columns: 64px minmax(90px,1fr) 52px 64px 78px 64px; gap: 6px; align-items: center; padding: 4px 0; border-bottom: 1px dashed var(--border); font-size: 11px; }
-  .log-row.head { color: var(--muted); position: sticky; top: 0; background: var(--card); z-index: 1; }
+  .logs { max-height: 430px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .logs-summary { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--muted); margin-bottom: 7px; }
+  .log-row { display: grid; grid-template-columns: 62px minmax(120px,1fr) 52px 58px 58px 62px 86px 62px 16px; gap: 6px; align-items: center; padding: 4px 0; border-bottom: 1px dashed var(--border); font-size: 11px; cursor: pointer; }
+  .log-row:hover { background: rgba(79,140,255,.07); }
+  .log-row.head { color: var(--muted); position: sticky; top: 0; background: var(--card); z-index: 1; cursor: default; }
+  .log-row.head:hover { background: var(--card); }
   .log-model { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .log-caret { color: var(--muted); font-size: 10px; text-align: right; }
+  .log-detail { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px 16px; background: #101626; border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; margin: 2px 0 7px; font-size: 11px; }
+  .log-detail .k { color: var(--muted); display: block; font-size: 10px; }
+  .log-detail .v { color: var(--text); word-break: break-all; }
+  .log-filter { margin: 0 0 7px; padding: 6px 9px; font-size: 12px; }
   .bar { height: 5px; border-radius: 3px; background: #0b101c; border: 1px solid var(--border); overflow: hidden; margin: 3px 0 5px; }
   .bar > i { display: block; height: 100%; background: var(--ok); }
   .bar.warn > i { background: var(--warn); }
@@ -192,7 +200,9 @@
             <button class="sm ghost" onclick="clearLogs()">清空日志</button>
             <button class="sm ghost" onclick="clearCaches()">清缓存</button>
           </div>
-          <div class="hint" style="margin-bottom:8px">最近 500 条请求（内存中，不落盘）。清空日志不会影响账号/Key；清缓存会清掉 Credits 查询缓存和对话摘要缓存。</div>
+          <div class="hint" style="margin-bottom:8px">最近 500 条请求（内存中，不落盘）。点击一行查看请求 ID、账号、缓存、停止原因等详情。</div>
+          <div id="logsSummary" class="logs-summary"></div>
+          <input id="logFilter" class="log-filter" placeholder="筛选模型 / 接口 / 状态 / 错误…" oninput="renderLogs()">
           <div id="logsBody" class="logs"></div>
           <div class="msg" id="logsMsg"></div>
         </div>
@@ -573,26 +583,100 @@ async function deleteKey(key) {
 
 // ---- Request logs ----
 let _logsTimer = null;
-async function loadLogs() {
-  const { ok, data } = await api('/admin/logs?limit=200');
-  if (!ok) { show('logsMsg', typeof data.detail==='string' ? data.detail : '加载失败', false); return; }
-  const logs = data.logs || [];
-  let html = `<div class="log-row head"><span>时间</span><span>接口 / 模型</span><span>状态</span><span>耗时</span><span>输入/输出</span><span>Credits</span></div>`;
+let _logsCache = [];
+const _expandedLogs = new Set();
+
+function esc(v) {
+  return String(v === null || v === undefined ? '' : v).replace(/[&<>"']/g, c => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  }[c]));
+}
+
+function fmtDuration(ms) {
+  if (ms === null || ms === undefined || isNaN(ms)) return '—';
+  return ms >= 1000 ? (ms/1000).toFixed(1) + 's' : Math.round(ms) + 'ms';
+}
+
+function logKey(l) {
+  return String(l.request_id || l.time || Math.random());
+}
+
+function toggleLog(key) {
+  if (_expandedLogs.has(key)) _expandedLogs.delete(key);
+  else _expandedLogs.add(key);
+  renderLogs();
+}
+
+function renderLogs() {
+  const query = (document.getElementById('logFilter')?.value || '').trim().toLowerCase();
+  const logs = _logsCache.filter(l => {
+    if (!query) return true;
+    return [l.endpoint, l.model, l.status, l.error, l.request_id, l.account]
+      .some(v => String(v ?? '').toLowerCase().includes(query));
+  });
+
+  const okCount = logs.filter(l => !l.status || l.status < 400).length;
+  const ttfts = logs.map(l => l.ttfb_ms).filter(v => typeof v === 'number' && v > 0);
+  const speeds = logs.map(l => l.speed_tps).filter(v => typeof v === 'number' && v > 0);
+  const credits = logs.reduce((sum, l) => sum + (typeof l.credits === 'number' ? l.credits : 0), 0);
+  const avg = arr => arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : null;
+  document.getElementById('logsSummary').innerHTML =
+    `<span>请求 <b>${logs.length}</b></span>` +
+    `<span>成功 <b style="color:var(--ok)">${okCount}</b></span>` +
+    `<span>平均首包 <b>${ttfts.length ? fmtDuration(avg(ttfts)) : '—'}</b></span>` +
+    `<span>平均速度 <b>${speeds.length ? avg(speeds).toFixed(1) + ' tok/s' : '—'}</b></span>` +
+    `<span>Credits 合计 <b>${credits ? credits.toFixed(4) : '—'}</b></span>`;
+
+  let html = `<div class="log-row head"><span>时间</span><span>接口 / 模型</span><span>状态</span><span>首包</span><span>耗时</span><span>速度</span><span>输入/输出</span><span>Credits</span><span></span></div>`;
   for (const l of logs) {
-    const t = l.time ? new Date(l.time * 1000).toLocaleTimeString() : '-';
-    const status = l.status || '-';
+    const key = logKey(l);
+    const expanded = _expandedLogs.has(key);
+    const t = l.time ? new Date(l.time * 1000).toLocaleTimeString() : '—';
+    const status = l.status || '—';
     const cls = status >= 500 ? 'bad' : status >= 400 ? 'warn' : 'ok';
-    const inTok = l.input_tokens != null ? fmtNum(l.input_tokens) : '-';
-    const outTok = l.output_tokens != null ? fmtNum(l.output_tokens) : '-';
-    const credits = l.credits != null ? Number(l.credits).toFixed(4) : '-';
+    const inTok = l.input_tokens != null ? fmtNum(l.input_tokens) : '—';
+    const outTok = l.output_tokens != null ? fmtNum(l.output_tokens) : '—';
+    const creditsText = typeof l.credits === 'number' ? l.credits.toFixed(4) : '—';
     const ep = (l.endpoint || '').replace('/v1/', '');
-    const model = l.model || '-';
-    const title = l.error ? ` title="${String(l.error).replaceAll('"','&quot;')}"` : '';
-    html += `<div class="log-row"${title}><span>${t}</span><span class="log-model">${ep} · ${model}</span><span><span class="badge ${cls}">${status}</span></span><span>${l.duration_ms != null ? Math.round(l.duration_ms)+'ms' : '-'}</span><span>${inTok}/${outTok}</span><span>${credits}</span></div>`;
+    const model = l.model || '—';
+    const speed = l.stream && typeof l.speed_tps === 'number' ? l.speed_tps.toFixed(1) + ' t/s' : '—';
+    const ttfb = l.stream ? fmtDuration(l.ttfb_ms) : '—';
+    const errMark = l.error ? ' <span class="badge bad">!</span>' : '';
+    html += `<div class="log-row" data-key="${esc(key)}" onclick="toggleLog(this.dataset.key)">` +
+      `<span>${t}</span><span class="log-model">${esc(ep)} · ${esc(model)}${errMark}</span>` +
+      `<span><span class="badge ${cls}">${status}</span></span>` +
+      `<span>${ttfb}</span><span>${fmtDuration(l.duration_ms)}</span>` +
+      `<span>${speed}</span><span>${inTok}/${outTok}</span>` +
+      `<span>${creditsText}</span><span class="log-caret">${expanded ? '▾' : '▸'}</span></div>`;
+    if (expanded) {
+      const detail = (label, value) => `<div><span class="k">${label}</span><span class="v">${esc(value ?? '—')}</span></div>`;
+      html += `<div class="log-detail">` +
+        detail('请求 ID', l.request_id) +
+        detail('客户端', l.client) +
+        detail('账号', l.account) +
+        detail('会话 ID', l.conversation_id) +
+        detail('Key', l.key) +
+        detail('流式', l.stream ? '是' : '否') +
+        detail('停止原因', l.stop_reason) +
+        detail('工具调用', l.tool_calls) +
+        detail('缓存读', l.cache_read_tokens) +
+        detail('缓存写', l.cache_creation_tokens) +
+        detail('总 tokens', l.total_tokens) +
+        detail('User-Agent', l.user_agent) +
+        detail('错误', l.error) +
+        `</div>`;
+    }
   }
   if (!logs.length) html += '<div style="color:var(--muted);font-size:11px;padding:8px 0">暂无请求日志</div>';
   document.getElementById('logsBody').innerHTML = html;
-  show('logsMsg', `当前 ${logs.length} 条 · 累计 ${data.total || logs.length} 条 · 已更新 ${new Date().toLocaleTimeString()}`, true);
+}
+
+async function loadLogs() {
+  const { ok, data } = await api('/admin/logs?limit=200');
+  if (!ok) { show('logsMsg', typeof data.detail==='string' ? data.detail : '加载失败', false); return; }
+  _logsCache = data.logs || [];
+  renderLogs();
+  show('logsMsg', `当前 ${_logsCache.length} 条 · 累计 ${data.total || _logsCache.length} 条 · 已更新 ${new Date().toLocaleTimeString()}`, true);
 }
 
 function startLogsAutoRefresh() {
@@ -605,7 +689,7 @@ function startLogsAutoRefresh() {
 async function clearLogs() {
   if (!confirm('确定清空内存中的请求日志？')) return;
   const { ok, data } = await api('/admin/logs/clear', { method: 'POST' });
-  if (ok) { show('logsMsg', `已清空 ${data.cleared || 0} 条日志`, true); await loadLogs(); }
+  if (ok) { _expandedLogs.clear(); show('logsMsg', `已清空 ${data.cleared || 0} 条日志`, true); await loadLogs(); }
   else show('logsMsg', typeof data.detail==='string' ? data.detail : '清空失败', false);
 }
 

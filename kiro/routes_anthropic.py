@@ -521,6 +521,7 @@ async def messages(
         # Resolve once per request (not per attempt) so every failover attempt
         # reuses the same upstream prefix-cache affinity key.
         conversation_id = resolve_conversation_id(request_data, request_data.messages)
+        request.state.request_log_conversation_id = conversation_id
 
         for attempt in range(MAX_ATTEMPTS):
             # Get next available account (excluding already tried)
@@ -561,6 +562,7 @@ async def messages(
             
             # Mark account as tried in current failover loop
             tried_accounts.add(account.id)
+            request.state.request_log_account = account.id
             
             # Use objects from account
             auth_manager = account.auth_manager
@@ -900,6 +902,7 @@ async def messages(
         # LEGACY MODE: Single Account (no failover)
         # ==============================================================================
         account = request.app.state.account_manager.get_first_account()
+        request.state.request_log_account = account.id
         if not account.auth_manager:
             logger.error("No initialized accounts available (legacy mode)")
             return JSONResponse(
@@ -928,6 +931,7 @@ async def messages(
     
     # Conversation ID doubles as the upstream prefix-cache affinity key
     conversation_id = resolve_conversation_id(request_data, request_data.messages)
+    request.state.request_log_conversation_id = conversation_id
     
     # Build payload for Kiro
     # profileArn is required by runtime.kiro.dev for all auth types

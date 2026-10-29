@@ -602,17 +602,40 @@ async def log_api_requests(request, call_next):
         usage = getattr(request.state, "request_log_usage", None) or {}
         input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens")
         output_tokens = usage.get("output_tokens") or usage.get("completion_tokens")
+        duration_ms = round((time.perf_counter() - started) * 1000, 1)
+        is_stream = bool(getattr(request.state, "request_log_stream", entry.get("stream")))
+        ttfb_ms = entry.get("ttfb_ms") if is_stream else None
+        speed = None
+        if is_stream and output_tokens and duration_ms and ttfb_ms and duration_ms > ttfb_ms:
+            speed = round(output_tokens / ((duration_ms - ttfb_ms) / 1000.0), 1)
+
+        raw_key = getattr(request.state, "api_key", None)
+        if raw_key:
+            masked_key = raw_key[:8] + "…" + raw_key[-4:]
+        else:
+            masked_key = "admin"
+
         entry.update(
             model=getattr(request.state, "request_log_model", None) or entry.get("model"),
             status=getattr(request.state, "request_log_status", None) or response.status_code,
             error=getattr(request.state, "request_log_error", None),
-            stream=bool(getattr(request.state, "request_log_stream", entry.get("stream"))),
+            stream=is_stream,
+            ttfb_ms=ttfb_ms,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=usage.get("total_tokens"),
             credits=usage.get("credits_used"),
-            duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            cache_read_tokens=usage.get("cache_read_input_tokens"),
+            cache_creation_tokens=usage.get("cache_creation_input_tokens"),
+            stop_reason=usage.get("stop_reason"),
+            tool_calls=usage.get("tool_calls"),
+            duration_ms=duration_ms,
+            speed_tps=speed,
+            account=getattr(request.state, "request_log_account", None),
+            conversation_id=getattr(request.state, "request_log_conversation_id", None),
             request_id=getattr(request.state, "request_id", None),
+            key=masked_key,
+            user_agent=(request.headers.get("user-agent") or "")[:160],
         )
         request_log_store.add(**entry)
 
@@ -622,8 +645,12 @@ async def log_api_requests(request, call_next):
 
         async def logged_iterator():
             nonlocal finalized
+            first_chunk_at = None
             try:
                 async for chunk in original_iterator:
+                    if first_chunk_at is None:
+                        first_chunk_at = time.perf_counter()
+                        entry["ttfb_ms"] = round((first_chunk_at - started) * 1000, 1)
                     yield chunk
             finally:
                 if not finalized:

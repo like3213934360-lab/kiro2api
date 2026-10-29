@@ -1034,6 +1034,10 @@ async def stream_kiro_to_anthropic(
                     "output_tokens": output_tokens,
                     "total_tokens": input_tokens + output_tokens,
                     "credits_used": credits_used,
+                    "cache_read_input_tokens": upstream_cache_usage.get("cache_read_input_tokens"),
+                    "cache_creation_input_tokens": upstream_cache_usage.get("cache_creation_input_tokens"),
+                    "stop_reason": stop_reason,
+                    "tool_calls": len(tool_blocks),
                 })
                 if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
                     await result
@@ -1273,6 +1277,10 @@ async def collect_anthropic_response(
                 "output_tokens": output_tokens,
                 "total_tokens": input_tokens + output_tokens,
                 "credits_used": collected_credits,
+                "cache_read_input_tokens": upstream_cache_usage.get("cache_read_input_tokens"),
+                "cache_creation_input_tokens": upstream_cache_usage.get("cache_creation_input_tokens"),
+                "stop_reason": stop_reason,
+                "tool_calls": len(result.tool_calls),
             })
             if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
                 await result
