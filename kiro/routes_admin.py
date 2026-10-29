@@ -71,8 +71,29 @@ except ImportError:
 
 ADMIN_COOKIE_NAME = "kgw_admin"
 
-# Process-level session salt: cookie holds sha256(password + salt), restart invalidates
-_SESSION_SALT = secrets.token_hex(16)
+# Persistent session salt: cookies survive gateway restarts. Logout rotates the
+# salt, which invalidates every existing admin cookie.
+_SESSION_SALT_FILE = Path(__file__).parent.parent / "admin_session_secret"
+
+
+def _load_session_salt() -> str:
+    try:
+        if _SESSION_SALT_FILE.exists():
+            value = _SESSION_SALT_FILE.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+        value = secrets.token_hex(32)
+        _SESSION_SALT_FILE.write_text(value, encoding="utf-8")
+        try:
+            _SESSION_SALT_FILE.chmod(0o600)
+        except OSError:
+            pass
+        return value
+    except Exception:
+        return secrets.token_hex(16)
+
+
+_SESSION_SALT = _load_session_salt()
 _active_session = ""
 
 # /v1/credits rate limiting: key -> list of timestamps
@@ -85,8 +106,10 @@ def _session_token_for(password: str) -> str:
 
 
 def _is_valid_session(token: Optional[str]) -> bool:
-    """Check the session cookie against the active session."""
-    return bool(_active_session) and token == _active_session
+    """Check the session cookie against the current salt/password."""
+    if not ADMIN_PASSWORD or not token:
+        return False
+    return secrets.compare_digest(token, _session_token_for(ADMIN_PASSWORD))
 
 
 router = APIRouter(tags=["Admin Console"])
@@ -197,9 +220,15 @@ async def admin_login(request: Request, response: Response):
 
 @router.post("/admin/logout")
 async def admin_logout(response: Response):
-    """Log out from the admin console."""
-    global _active_session
+    """Log out and invalidate every existing admin cookie."""
+    global _SESSION_SALT, _active_session
     _active_session = ""
+    _SESSION_SALT = secrets.token_hex(32)
+    try:
+        _SESSION_SALT_FILE.write_text(_SESSION_SALT, encoding="utf-8")
+        _SESSION_SALT_FILE.chmod(0o600)
+    except Exception as exc:
+        logger.warning(f"Failed to persist admin session salt: {exc}")
     response.delete_cookie(ADMIN_COOKIE_NAME, path="/")
     return {"ok": True}
 

@@ -2420,6 +2420,8 @@ class TestToolChoiceAndStructuredOutput:
 
 class TestOfficialEffortDefaults:
     def test_default_effort_matches_anthropic_docs(self):
+        from kiro.config import MODEL_EFFORT_DEFAULTS
+
         expected = {
             "claude-opus-5.5": "medium",
             "claude-sonnet-5": "high",
@@ -2436,6 +2438,9 @@ class TestOfficialEffortDefaults:
             with patch(
                 "kiro.converters_anthropic.get_model_id_for_kiro",
                 return_value=model,
+            ), patch(
+                "kiro.converters_anthropic.get_effective_default",
+                side_effect=lambda m: MODEL_EFFORT_DEFAULTS.get(m),
             ):
                 payload = anthropic_to_kiro(request, "conv-default", "arn:aws:test")
 

@@ -46,3 +46,6 @@ gateway.err.log
 
 # Runtime admin overrides (model effort defaults)
 effort_defaults.json
+
+# Admin session secret (keeps login across restarts)
+admin_session_secret

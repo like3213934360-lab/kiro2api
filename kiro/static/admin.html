@@ -221,6 +221,12 @@ async function api(path, opts) {
   const r = await fetch(path, opts);
   let j = {};
   try { j = await r.json(); } catch(e) {}
+  if (r.status === 401) {
+    // Session expired or the server was restarted with a new salt.
+    document.getElementById('loginCard').classList.remove('hidden');
+    document.getElementById('mainPanel').classList.add('hidden');
+    show('loginMsg', '登录已过期，请重新登录', false);
+  }
   return { ok: r.ok, status: r.status, data: j };
 }
 
