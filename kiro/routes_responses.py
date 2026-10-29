@@ -34,6 +34,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 
 from kiro.config import PROFILE_ARN, MODEL_ALIASES
+from kiro.effort import effort_from_payload
 from kiro.model_resolver import apply_model_alias
 from kiro.models_responses import ResponsesRequest
 from kiro.converters_responses import (
