@@ -1033,6 +1033,7 @@ async def stream_kiro_to_anthropic(
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "total_tokens": input_tokens + output_tokens,
+                    "credits_used": credits_used,
                 })
                 if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
                     await result
@@ -1271,6 +1272,7 @@ async def collect_anthropic_response(
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "total_tokens": input_tokens + output_tokens,
+                "credits_used": collected_credits,
             })
             if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
                 await result

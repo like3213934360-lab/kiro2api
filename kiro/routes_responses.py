@@ -194,6 +194,8 @@ async def responses(request: Request, request_data: ResponsesRequest):
     # Translate client-facing aliases (e.g. "auto-kiro" → "auto") before any payload
     # is built, so Kiro never receives the local alias name.
     request_data.model = apply_model_alias(request_data.model, MODEL_ALIASES)
+    request.state.request_log_model = request_data.model
+    request.state.request_log_stream = bool(getattr(request_data, "stream", False))
 
     messages_for_tokenizer, tools_for_tokenizer = _build_tokenizer_inputs(request_data)
 

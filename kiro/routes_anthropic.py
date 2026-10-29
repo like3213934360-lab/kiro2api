@@ -313,6 +313,8 @@ async def messages(
     # Translate client-facing aliases (e.g. "auto-kiro" → "auto") before any payload
     # is built, so Kiro never receives the local alias name.
     request_data.model = apply_model_alias(request_data.model, MODEL_ALIASES)
+    request.state.request_log_model = request_data.model
+    request.state.request_log_stream = bool(request_data.stream)
     base_model_name, _, _ = split_effort_suffix(request_data.model)
 
     # Cheap pre-check before any upstream work. If the prompt is already over

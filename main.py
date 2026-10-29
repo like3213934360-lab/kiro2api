@@ -46,6 +46,7 @@ import json
 import logging
 import sys
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -95,6 +96,7 @@ from kiro.routes_responses import router as responses_router
 from kiro.routes_admin import router as admin_router
 from kiro.exceptions import validation_exception_handler
 from kiro.debug_middleware import DebugLoggerMiddleware
+from kiro.request_log import request_log_store
 
 
 # --- Loguru Configuration ---
@@ -566,6 +568,73 @@ app = FastAPI(
     version=APP_VERSION,
     lifespan=lifespan
 )
+
+
+@app.middleware("http")
+async def log_api_requests(request, call_next):
+    """Record recent API request metadata for the admin console."""
+    path = request.url.path
+    if path not in ("/v1/messages", "/v1/chat/completions", "/v1/responses"):
+        return await call_next(request)
+
+    started = time.perf_counter()
+    entry = {
+        "endpoint": path,
+        "model": getattr(request.state, "request_log_model", None),
+        "stream": bool(getattr(request.state, "request_log_stream", False)),
+        "client": request.client.host if request.client else None,
+        "status": None,
+        "error": None,
+    }
+
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        entry.update(
+            status=500,
+            error=str(exc)[:300],
+            duration_ms=round((time.perf_counter() - started) * 1000, 1),
+        )
+        request_log_store.add(**entry)
+        raise
+
+    def finalize() -> None:
+        usage = getattr(request.state, "request_log_usage", None) or {}
+        input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens")
+        output_tokens = usage.get("output_tokens") or usage.get("completion_tokens")
+        entry.update(
+            model=getattr(request.state, "request_log_model", None) or entry.get("model"),
+            status=getattr(request.state, "request_log_status", None) or response.status_code,
+            error=getattr(request.state, "request_log_error", None),
+            stream=bool(getattr(request.state, "request_log_stream", entry.get("stream"))),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=usage.get("total_tokens"),
+            credits=usage.get("credits_used"),
+            duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            request_id=getattr(request.state, "request_id", None),
+        )
+        request_log_store.add(**entry)
+
+    if hasattr(response, "body_iterator"):
+        original_iterator = response.body_iterator
+        finalized = False
+
+        async def logged_iterator():
+            nonlocal finalized
+            try:
+                async for chunk in original_iterator:
+                    yield chunk
+            finally:
+                if not finalized:
+                    finalized = True
+                    finalize()
+
+        response.body_iterator = logged_iterator()
+    else:
+        finalize()
+
+    return response
 
 
 @app.middleware("http")

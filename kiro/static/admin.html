@@ -55,6 +55,10 @@
   .badge.bad { background: rgba(255,107,107,.15); color: var(--err); }
   .badge.warn{ background: rgba(255,180,84,.15);  color: var(--warn); }
   .effort-select { width: auto; padding: 3px 8px; font-size: 11px; margin: 0; border-radius: 6px; }
+  .logs { max-height: 360px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .log-row { display: grid; grid-template-columns: 64px minmax(90px,1fr) 52px 64px 78px 64px; gap: 6px; align-items: center; padding: 4px 0; border-bottom: 1px dashed var(--border); font-size: 11px; }
+  .log-row.head { color: var(--muted); position: sticky; top: 0; background: var(--card); z-index: 1; }
+  .log-model { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bar { height: 5px; border-radius: 3px; background: #0b101c; border: 1px solid var(--border); overflow: hidden; margin: 3px 0 5px; }
   .bar > i { display: block; height: 100%; background: var(--ok); }
   .bar.warn > i { background: var(--warn); }
@@ -170,14 +174,28 @@
         </div>
       </div>
 
-      <!-- 右：Key 列表 -->
-      <div class="card" style="margin-bottom:0">
-        <div class="card-hdr">
-          <h2>已有 Key</h2>
-          <button class="sm ghost" onclick="loadKeys()">刷新</button>
+      <!-- 右：Key 列表 + 请求日志 -->
+      <div>
+        <div class="card">
+          <div class="card-hdr">
+            <h2>已有 Key</h2>
+            <button class="sm ghost" onclick="loadKeys()">刷新</button>
+          </div>
+          <div id="keysTable"></div>
+          <div class="msg" id="keysMsg"></div>
         </div>
-        <div id="keysTable"></div>
-        <div class="msg" id="keysMsg"></div>
+
+        <div class="card" style="margin-bottom:0">
+          <div class="card-hdr">
+            <h2>请求日志</h2>
+            <button class="sm ghost" onclick="loadLogs()">刷新</button>
+            <button class="sm ghost" onclick="clearLogs()">清空日志</button>
+            <button class="sm ghost" onclick="clearCaches()">清缓存</button>
+          </div>
+          <div class="hint" style="margin-bottom:8px">最近 500 条请求（内存中，不落盘）。清空日志不会影响账号/Key；清缓存会清掉 Credits 查询缓存和对话摘要缓存。</div>
+          <div id="logsBody" class="logs"></div>
+          <div class="msg" id="logsMsg"></div>
+        </div>
       </div>
 
     </div><!-- /grid2 -->
@@ -240,7 +258,7 @@ async function login() {
   if (ok) {
     document.getElementById('loginCard').classList.add('hidden');
     document.getElementById('mainPanel').classList.remove('hidden');
-    fillUsageBox(); loadKeys(); loadModels(); loadOverview();
+    fillUsageBox(); loadKeys(); loadModels(); loadOverview(); loadLogs(); startLogsAutoRefresh();
   } else {
     show('loginMsg', (data.detail && data.detail.detail) || data.detail || '登录失败', false);
   }
@@ -553,6 +571,55 @@ async function deleteKey(key) {
   if (ok) loadKeys(); else show('keysMsg', typeof data.detail==='string' ? data.detail : '操作失败', false);
 }
 
+// ---- Request logs ----
+let _logsTimer = null;
+async function loadLogs() {
+  const { ok, data } = await api('/admin/logs?limit=200');
+  if (!ok) { show('logsMsg', typeof data.detail==='string' ? data.detail : '加载失败', false); return; }
+  const logs = data.logs || [];
+  let html = `<div class="log-row head"><span>时间</span><span>接口 / 模型</span><span>状态</span><span>耗时</span><span>输入/输出</span><span>Credits</span></div>`;
+  for (const l of logs) {
+    const t = l.time ? new Date(l.time * 1000).toLocaleTimeString() : '-';
+    const status = l.status || '-';
+    const cls = status >= 500 ? 'bad' : status >= 400 ? 'warn' : 'ok';
+    const inTok = l.input_tokens != null ? fmtNum(l.input_tokens) : '-';
+    const outTok = l.output_tokens != null ? fmtNum(l.output_tokens) : '-';
+    const credits = l.credits != null ? Number(l.credits).toFixed(4) : '-';
+    const ep = (l.endpoint || '').replace('/v1/', '');
+    const model = l.model || '-';
+    const title = l.error ? ` title="${String(l.error).replaceAll('"','&quot;')}"` : '';
+    html += `<div class="log-row"${title}><span>${t}</span><span class="log-model">${ep} · ${model}</span><span><span class="badge ${cls}">${status}</span></span><span>${l.duration_ms != null ? Math.round(l.duration_ms)+'ms' : '-'}</span><span>${inTok}/${outTok}</span><span>${credits}</span></div>`;
+  }
+  if (!logs.length) html += '<div style="color:var(--muted);font-size:11px;padding:8px 0">暂无请求日志</div>';
+  document.getElementById('logsBody').innerHTML = html;
+  show('logsMsg', `当前 ${logs.length} 条 · 累计 ${data.total || logs.length} 条 · 已更新 ${new Date().toLocaleTimeString()}`, true);
+}
+
+function startLogsAutoRefresh() {
+  if (_logsTimer) return;
+  _logsTimer = setInterval(() => {
+    if (!document.getElementById('mainPanel').classList.contains('hidden')) loadLogs();
+  }, 10000);
+}
+
+async function clearLogs() {
+  if (!confirm('确定清空内存中的请求日志？')) return;
+  const { ok, data } = await api('/admin/logs/clear', { method: 'POST' });
+  if (ok) { show('logsMsg', `已清空 ${data.cleared || 0} 条日志`, true); await loadLogs(); }
+  else show('logsMsg', typeof data.detail==='string' ? data.detail : '清空失败', false);
+}
+
+async function clearCaches() {
+  if (!confirm('确定清除 Credits 查询缓存和对话摘要缓存？不会影响账号、Key 或使用记录。')) return;
+  const { ok, data } = await api('/admin/cache/clear', { method: 'POST' });
+  if (ok) {
+    show('logsMsg', `已清缓存：Credits ${data.credits_cache_entries || 0} 条，摘要 ${data.summary_cache_entries || 0} 条`, true);
+    await loadCredits();
+  } else {
+    show('logsMsg', typeof data.detail==='string' ? data.detail : '清缓存失败', false);
+  }
+}
+
 // ---- Models / effort ----
 async function loadModels() {
   const { ok, data } = await api('/admin/models');
@@ -630,7 +697,7 @@ fetch('/admin/keys').then(r => {
   if (r.ok) {
     document.getElementById('loginCard').classList.add('hidden');
     document.getElementById('mainPanel').classList.remove('hidden');
-    fillUsageBox(); loadKeys(); loadModels(); loadOverview();
+    fillUsageBox(); loadKeys(); loadModels(); loadOverview(); loadLogs(); startLogsAutoRefresh();
   }
 });
 </script>

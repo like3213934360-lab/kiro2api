@@ -60,6 +60,7 @@ from kiro.effort_store import (
     get_override,
     set_override,
 )
+from kiro.request_log import request_log_store
 from kiro.routes_openai import verify_api_key, extract_bearer_key
 from kiro.credits import credits_service
 
@@ -414,6 +415,44 @@ async def admin_set_overage(request: Request):
     if not success:
         raise HTTPException(status_code=502, detail=error or "Kiro rejected the request")
     return {"ok": True, "accountId": account_id, "enabled": enabled}
+
+
+@router.get("/admin/logs", dependencies=[Depends(require_admin)])
+async def admin_logs(request: Request):
+    """Recent in-memory request log entries."""
+    limit = request.query_params.get("limit", "200")
+    try:
+        limit_int = int(limit)
+    except ValueError:
+        limit_int = 200
+    return request_log_store.list(limit_int)
+
+
+@router.post("/admin/logs/clear", dependencies=[Depends(require_admin)])
+async def admin_logs_clear():
+    """Clear the in-memory request log."""
+    return {"ok": True, "cleared": request_log_store.clear()}
+
+
+@router.post("/admin/cache/clear", dependencies=[Depends(require_admin)])
+async def admin_cache_clear():
+    """Clear in-memory caches (credits + conversation summaries)."""
+    credits_count = len(getattr(credits_service, "_cache", {}) or {})
+    try:
+        from kiro.compaction import _CACHE as summary_cache
+        summary_count = len(summary_cache)
+        summary_cache.clear()
+    except Exception:
+        summary_count = 0
+    try:
+        credits_service._cache.clear()
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "credits_cache_entries": credits_count,
+        "summary_cache_entries": summary_count,
+    }
 
 
 @router.get("/admin/overview", dependencies=[Depends(require_admin)])

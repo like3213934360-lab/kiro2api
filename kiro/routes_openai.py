@@ -215,13 +215,17 @@ def make_usage_reporter(request: Request):
         Callable[[dict], None] or None
     """
     key = getattr(request.state, "api_key", None)
-    if not key:
-        return None
-    key_manager = _get_key_manager(request)
-    if key_manager is None:
-        return None
+    key_manager = _get_key_manager(request) if key else None
 
     def report(usage: dict) -> None:
+        # Always expose the final usage to the request-log middleware; external
+        # keys additionally get their quota counters updated.
+        try:
+            request.state.request_log_usage = usage
+        except Exception:
+            pass
+        if not key or key_manager is None:
+            return
         tokens = usage.get("total_tokens", 0) or 0
         try:
             # record_usage is async; schedule it without blocking the stream
@@ -360,6 +364,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     # Translate client-facing aliases (e.g. "auto-kiro" → "auto") before any payload
     # is built, so Kiro never receives the local alias name.
     request_data.model = apply_model_alias(request_data.model, MODEL_ALIASES)
+    request.state.request_log_model = request_data.model
+    request.state.request_log_stream = bool(request_data.stream)
     
     # Note: prepare_new_request() and log_request_body() are now called by DebugLoggerMiddleware
     # This ensures debug logging works even for requests that fail Pydantic validation (422 errors)
