@@ -269,10 +269,12 @@ MODEL_ALIASES: Dict[str, str] = {
 # output_config.effort. Set a value to an empty string to leave the model at
 # Kiro's own default.
 MODEL_EFFORT_DEFAULTS: Dict[str, str] = {
-    "claude-opus-5.5": os.getenv("MODEL_EFFORT_OPUS_5_5", "high"),
-    "claude-sonnet-5": os.getenv("MODEL_EFFORT_SONNET_5", "medium"),
-    "claude-sonnet-5.5": os.getenv("MODEL_EFFORT_SONNET_5_5", "medium"),
-    "claude-haiku-5.5": os.getenv("MODEL_EFFORT_HAIKU_5_5", "low"),
+    # Anthropic's documented defaults: medium on Opus 5.5 and Haiku 5.5,
+    # high on "most models" (which includes the Sonnet 5.x family).
+    "claude-opus-5.5": os.getenv("MODEL_EFFORT_OPUS_5_5", "medium"),
+    "claude-sonnet-5": os.getenv("MODEL_EFFORT_SONNET_5", "high"),
+    "claude-sonnet-5.5": os.getenv("MODEL_EFFORT_SONNET_5_5", "high"),
+    "claude-haiku-5.5": os.getenv("MODEL_EFFORT_HAIKU_5_5", "medium"),
 }
 
 # Models to hide from /v1/models endpoint.

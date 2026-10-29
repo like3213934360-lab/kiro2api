@@ -2416,3 +2416,29 @@ class TestToolChoiceAndStructuredOutput:
         assert "JSON.parse" in content
         assert "expression" in content
         assert "additionalModelRequestFields" not in payload
+
+
+class TestOfficialEffortDefaults:
+    def test_default_effort_matches_anthropic_docs(self):
+        expected = {
+            "claude-opus-5.5": "medium",
+            "claude-sonnet-5": "high",
+            "claude-sonnet-5.5": "high",
+            "claude-haiku-5.5": "medium",
+        }
+
+        for model, effort in expected.items():
+            request = AnthropicMessagesRequest(
+                model=model,
+                max_tokens=1024,
+                messages=[AnthropicMessage(role="user", content="Hello")],
+            )
+            with patch(
+                "kiro.converters_anthropic.get_model_id_for_kiro",
+                return_value=model,
+            ):
+                payload = anthropic_to_kiro(request, "conv-default", "arn:aws:test")
+
+            assert payload["additionalModelRequestFields"] == {
+                "output_config": {"effort": effort}
+            }, model
