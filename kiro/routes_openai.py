@@ -44,6 +44,11 @@ from kiro.config import (
     MODEL_ALIASES,
     FALLBACK_MODELS,
 )
+from kiro.auth_failures import (
+    REASON_MISSING_CREDENTIALS,
+    REASON_UNKNOWN_KEY,
+    log_unauthorized_attempt,
+)
 from kiro.effort import EFFORT_LEVELS, effort_from_payload, supports_effort
 from kiro.models_openai import (
     OpenAIModel,
@@ -192,7 +197,12 @@ async def verify_api_key(request: Request, auth_header: str = Security(api_key_h
                 await check_external_key_access(request, key)
                 return True
 
-    logger.warning("Access attempt with invalid API key.")
+    log_unauthorized_attempt(
+        scheme="OpenAI",
+        request=request,
+        reason=REASON_UNKNOWN_KEY if key else REASON_MISSING_CREDENTIALS,
+        key=key,
+    )
     raise HTTPException(status_code=401, detail="Invalid or missing API Key")
 
 

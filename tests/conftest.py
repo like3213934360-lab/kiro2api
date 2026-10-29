@@ -1852,3 +1852,44 @@ def temp_account_credentials_files(tmp_path):
     files["account3"] = str(account3)
     
     return files
+
+
+# =============================================================================
+# Logging Fixtures
+# =============================================================================
+
+@pytest.fixture
+def loguru_records():
+    """
+    Capture every loguru record emitted while the test runs.
+
+    Yields:
+        List of loguru ``Record`` dicts (``level``, ``message``, ...)
+
+    Usage:
+        warnings = [r for r in loguru_records if r["level"].name == "WARNING"]
+    """
+    from loguru import logger
+
+    records: List[Dict[str, Any]] = []
+    sink_id = logger.add(lambda message: records.append(message.record), level="TRACE")
+    try:
+        yield records
+    finally:
+        logger.remove(sink_id)
+
+
+@pytest.fixture
+def reset_auth_throttle():
+    """
+    Clear the shared unauthorized-attempt throttle around a test.
+
+    Prevents throttle state from leaking between tests that exercise the
+    authentication dependencies.
+    """
+    from kiro.auth_failures import reset_unauthorized_attempts
+
+    reset_unauthorized_attempts()
+    yield
+    reset_unauthorized_attempts()
+

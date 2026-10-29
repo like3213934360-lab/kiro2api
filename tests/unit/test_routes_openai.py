@@ -2152,3 +2152,96 @@ class TestChatCompletionsModelAlias:
         model = _capture_chat_model(test_client, valid_proxy_api_key, "claude-sonnet-4-5")
         print(f"Comparing: Expected 'claude-sonnet-4-5', Got {model!r}")
         assert model == "claude-sonnet-4-5"
+
+
+class TestUnauthorizedAttemptLogging:
+    """
+    Tests for throttled logging of rejected API keys.
+
+    The throttle lives in kiro/auth_failures.py: the first rejection of a
+    (client, path, reason) bucket is a WARNING, repeats are counted instead of
+    logged, so a 30s poller cannot flood server.log.
+    """
+
+    @staticmethod
+    def _rejections(records):
+        return [
+            record
+            for record in records
+            if record["level"].name == "WARNING"
+            and "Rejected OpenAI request" in record["message"]
+        ]
+
+    def test_repeated_unauthenticated_probes_log_once(
+        self, test_client, loguru_records, reset_auth_throttle
+    ):
+        """
+        What it does: Sends three unauthenticated /v1/models probes.
+        Purpose: Local pollers must not produce a warning per request.
+        """
+        print("Action: GET /v1/models three times without auth...")
+        for _ in range(3):
+            assert test_client.get("/v1/models").status_code == 401
+
+        logged = self._rejections(loguru_records)
+        print(f"Result: {len(logged)} warning(s)")
+        assert len(logged) == 1
+        message = logged[0]["message"]
+        assert "GET /v1/models" in message
+        assert "missing_credentials" in message
+        assert "Authorization: Bearer" in message
+
+    def test_wrong_key_reports_unknown_key_reason(
+        self, test_client, loguru_records, reset_auth_throttle, invalid_proxy_api_key
+    ):
+        """
+        What it does: Sends an invalid key to /v1/models.
+        Purpose: Missing credentials and wrong credentials must be distinct.
+        """
+        print("Action: GET /v1/models with an invalid key...")
+        response = test_client.get(
+            "/v1/models",
+            headers={"Authorization": f"Bearer {invalid_proxy_api_key}"},
+        )
+
+        assert response.status_code == 401
+        logged = self._rejections(loguru_records)
+        assert len(logged) == 1
+        assert "unknown_key" in logged[0]["message"]
+        assert invalid_proxy_api_key not in logged[0]["message"]
+
+    def test_valid_key_logs_no_rejection(
+        self, test_client, loguru_records, reset_auth_throttle, valid_proxy_api_key
+    ):
+        """
+        What it does: Calls /v1/models with the correct key.
+        Purpose: Successful auth must never look suspicious in the log.
+        """
+        print("Action: GET /v1/models with a valid key...")
+        response = test_client.get(
+            "/v1/models",
+            headers={"Authorization": f"Bearer {valid_proxy_api_key}"},
+        )
+
+        assert response.status_code == 200
+        assert self._rejections(loguru_records) == []
+
+    def test_different_endpoints_are_reported_separately(
+        self, test_client, loguru_records, reset_auth_throttle
+    ):
+        """
+        What it does: Rejects requests on two endpoints without auth.
+        Purpose: Throttling is per endpoint, so both stay visible.
+        """
+        print("Action: Unauthenticated /v1/models then /v1/chat/completions...")
+        assert test_client.get("/v1/models").status_code == 401
+        response = test_client.post(
+            "/v1/chat/completions",
+            json={"model": "claude-sonnet-4-5", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 401
+        logged = self._rejections(loguru_records)
+        assert len(logged) == 2
+        paths = {"/v1/models" in item["message"] for item in logged}
+        assert paths == {True, False}

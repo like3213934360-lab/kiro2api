@@ -35,6 +35,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from loguru import logger
 
+from kiro.auth_failures import (
+    REASON_MISSING_CREDENTIALS,
+    REASON_UNKNOWN_KEY,
+    log_unauthorized_attempt,
+)
 from kiro.config import PROXY_API_KEY, PROFILE_ARN, MODEL_ALIASES
 from kiro.model_resolver import apply_model_alias
 from kiro.models_anthropic import (
@@ -249,9 +254,11 @@ async def verify_anthropic_api_key(
     if authorization:
         candidates.append(extract_bearer_key(authorization))
 
+    presented_key = ""
     for key in candidates:
         if not key:
             continue
+        presented_key = presented_key or key
         # Admin key - unlimited access
         if key == PROXY_API_KEY:
             return True
@@ -262,7 +269,12 @@ async def verify_anthropic_api_key(
             await check_external_key_access(request, key)
             return True
 
-    logger.warning("Access attempt with invalid API key (Anthropic endpoint)")
+    log_unauthorized_attempt(
+        scheme="Anthropic",
+        request=request,
+        reason=REASON_UNKNOWN_KEY if presented_key else REASON_MISSING_CREDENTIALS,
+        key=presented_key,
+    )
     raise HTTPException(
         status_code=401,
         detail={

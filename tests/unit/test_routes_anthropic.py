@@ -2931,3 +2931,100 @@ class TestAnthropicErrorMapping:
         body = json.loads(response.body)
         assert body["error"]["type"] == "invalid_request_error"
         assert "prompt is too long" in body["error"]["message"]
+
+
+class TestUnauthorizedAttemptLogging:
+    """
+    Tests for throttled logging of rejected API keys on the Anthropic surface.
+
+    Mirrors the OpenAI tests: one warning per bucket, repeats counted by
+    kiro/auth_failures.py.
+    """
+
+    _BODY = {
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+
+    @staticmethod
+    def _rejections(records):
+        return [
+            record
+            for record in records
+            if record["level"].name == "WARNING"
+            and "Rejected Anthropic request" in record["message"]
+        ]
+
+    def test_repeated_missing_key_requests_log_once(
+        self, test_client, loguru_records, reset_auth_throttle
+    ):
+        """
+        What it does: Posts three times to /v1/messages without credentials.
+        Purpose: Anthropic clients polling without a key must not flood logs.
+        """
+        print("Action: POST /v1/messages three times without auth...")
+        for _ in range(3):
+            response = test_client.post("/v1/messages", json=self._BODY)
+            assert response.status_code == 401
+
+        logged = self._rejections(loguru_records)
+        print(f"Result: {len(logged)} warning(s)")
+        assert len(logged) == 1
+        assert "POST /v1/messages" in logged[0]["message"]
+        assert "missing_credentials" in logged[0]["message"]
+
+    def test_invalid_x_api_key_reports_unknown_key(
+        self, test_client, loguru_records, reset_auth_throttle
+    ):
+        """
+        What it does: Sends a wrong x-api-key value.
+        Purpose: Wrong credentials must be reported as such, without the key.
+        """
+        print("Action: POST /v1/messages with an invalid x-api-key...")
+        response = test_client.post(
+            "/v1/messages",
+            headers={"x-api-key": "sk-gw-not-a-real-key"},
+            json=self._BODY,
+        )
+
+        assert response.status_code == 401
+        logged = self._rejections(loguru_records)
+        assert len(logged) == 1
+        assert "unknown_key" in logged[0]["message"]
+        assert "sk-gw-not-a-real-key" not in logged[0]["message"]
+
+    def test_valid_key_logs_no_rejection(
+        self, test_client, loguru_records, reset_auth_throttle
+    ):
+        """
+        What it does: Authenticates with PROXY_API_KEY via x-api-key.
+        Purpose: Successful auth must not emit rejection warnings.
+        """
+        print("Action: POST /v1/messages with a valid x-api-key...")
+        response = test_client.post(
+            "/v1/messages",
+            headers={"x-api-key": PROXY_API_KEY},
+            json=self._BODY,
+        )
+
+        assert response.status_code != 401
+        assert self._rejections(loguru_records) == []
+
+    def test_authorization_header_is_throttled_too(
+        self, test_client, loguru_records, reset_auth_throttle
+    ):
+        """
+        What it does: Repeats an invalid Authorization: Bearer request.
+        Purpose: The compatibility header path shares the same throttle.
+        """
+        print("Action: POST /v1/messages twice with an invalid bearer token...")
+        for _ in range(2):
+            response = test_client.post(
+                "/v1/messages",
+                headers={"Authorization": "Bearer sk-gw-wrong"},
+                json=self._BODY,
+            )
+            assert response.status_code == 401
+
+        assert len(self._rejections(loguru_records)) == 1
