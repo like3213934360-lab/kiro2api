@@ -28,7 +28,7 @@ Loads environment variables and provides typed access to them.
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -185,6 +185,13 @@ KIRO_API_HOST_TEMPLATE: str = "https://runtime.{region}.kiro.dev"
 # Host for Q API (ListAvailableModels)
 KIRO_Q_HOST_TEMPLATE: str = "https://runtime.{region}.kiro.dev"
 
+# Host for the model catalog endpoint (/ListAvailableModels).
+# The runtime.*.kiro.dev host no longer serves this endpoint (it answers HTTP 404),
+# while the CodeWhisperer/Q Developer control-plane host still does.
+# Override with KIRO_MODELS_HOST (without /ListAvailableModels) if needed.
+KIRO_MODELS_HOST_TEMPLATE: str = "https://codewhisperer.{region}.amazonaws.com"
+KIRO_MODELS_HOST_OVERRIDE: str = os.getenv("KIRO_MODELS_HOST", "")
+
 # Optional: override the complete API host (bypasses the template).
 # Useful when the default runtime.*.kiro.dev domain is blocked by a corporate proxy.
 # Example: KIRO_API_HOST="https://codewhisperer.us-east-1.amazonaws.com"
@@ -272,27 +279,58 @@ HIDDEN_FROM_LIST: List[str] = ["auto"]
 # Fallback Models Configuration (DNS Failure Recovery)
 # ==================================================================================================
 
-# Fallback model list - used when /ListAvailableModels API is unreachable.
-# This ensures basic functionality even with DNS/network issues.
+# Fallback model list - used when /ListAvailableModels API is unreachable,
+# rejects our request, or returns an empty catalog.
 #
-# IMPORTANT: This list represents known models at the time of this gateway version.
-# - Some models may not be available on your Kiro plan (e.g., Opus on free tier)
-# - New models released after this version won't appear here
-# - Update gateway regularly to get the latest model list
-FALLBACK_MODELS: List[Dict[str, str]] = [
-    {"modelId": "auto"},
-    {"modelId": "claude-sonnet-5"},
-    {"modelId": "claude-sonnet-4.5"},
-    {"modelId": "claude-sonnet-4.6"},
-    {"modelId": "claude-haiku-4.5"},
-    {"modelId": "claude-opus-5"},
-    {"modelId": "claude-opus-4.6"},
-    {"modelId": "claude-opus-4.7"},
-    {"modelId": "deepseek-3.2"},
-    {"modelId": "glm-5"},
-    {"modelId": "minimax-m2.1"},
-    {"modelId": "minimax-m2.5"},
-    {"modelId": "qwen3-coder-next"},
+# IMPORTANT: This list reflects the catalog of a KIRO POWER subscription as of
+# 2026-10 (captured from the live /ListAvailableModels response). Availability
+# still depends on your plan - free/trial tiers may get a reduced subset.
+# New models released after this snapshot require a gateway update.
+FALLBACK_MODELS: List[Dict[str, Any]] = [
+    {"modelId": "auto", "modelName": "Auto",
+     "tokenLimits": {"maxInputTokens": 1000000, "maxOutputTokens": 64000}},
+    {"modelId": "claude-opus-5.5", "modelName": "Claude Opus 5.5",
+     "tokenLimits": {"maxInputTokens": 1000000, "maxOutputTokens": 64000}},
+    {"modelId": "claude-sonnet-5.5", "modelName": "Claude Sonnet 5.5",
+     "tokenLimits": {"maxInputTokens": 1000000, "maxOutputTokens": 64000}},
+    {"modelId": "claude-haiku-5.5", "modelName": "Claude Haiku 5.5",
+     "tokenLimits": {"maxInputTokens": 1000000, "maxOutputTokens": 64000}},
+    {"modelId": "claude-opus-5", "modelName": "Claude Opus 5",
+     "tokenLimits": {"maxInputTokens": 1000000, "maxOutputTokens": 64000}},
+    {"modelId": "claude-sonnet-5", "modelName": "Claude Sonnet 5",
+     "tokenLimits": {"maxInputTokens": 1000000, "maxOutputTokens": 64000}},
+    {"modelId": "claude-opus-4.8", "modelName": "Claude Opus 4.8",
+     "tokenLimits": {"maxInputTokens": 1000000, "maxOutputTokens": 64000}},
+    {"modelId": "claude-opus-4.7", "modelName": "Claude Opus 4.7",
+     "tokenLimits": {"maxInputTokens": 1000000, "maxOutputTokens": 64000}},
+    {"modelId": "claude-opus-4.6", "modelName": "Claude Opus 4.6",
+     "tokenLimits": {"maxInputTokens": 1000000, "maxOutputTokens": 64000}},
+    {"modelId": "claude-sonnet-4.6", "modelName": "Claude Sonnet 4.6",
+     "tokenLimits": {"maxInputTokens": 1000000, "maxOutputTokens": 64000}},
+    {"modelId": "claude-opus-4.5", "modelName": "Claude Opus 4.5",
+     "tokenLimits": {"maxInputTokens": 200000, "maxOutputTokens": 64000}},
+    {"modelId": "claude-sonnet-4.5", "modelName": "Claude Sonnet 4.5",
+     "tokenLimits": {"maxInputTokens": 200000, "maxOutputTokens": 64000}},
+    {"modelId": "claude-haiku-4.5", "modelName": "Claude Haiku 4.5",
+     "tokenLimits": {"maxInputTokens": 200000, "maxOutputTokens": 64000}},
+    {"modelId": "gpt-5.6-sol", "modelName": "GPT 5.6 Sol",
+     "tokenLimits": {"maxInputTokens": 986000, "maxOutputTokens": 64000}},
+    {"modelId": "gpt-5.6-terra", "modelName": "GPT 5.6 Terra",
+     "tokenLimits": {"maxInputTokens": 986000, "maxOutputTokens": 64000}},
+    {"modelId": "gpt-5.6-luna", "modelName": "GPT 5.6 Luna",
+     "tokenLimits": {"maxInputTokens": 986000, "maxOutputTokens": 64000}},
+    {"modelId": "kimi-k3", "modelName": "Kimi K3",
+     "tokenLimits": {"maxInputTokens": 1000000, "maxOutputTokens": 64000}},
+    {"modelId": "deepseek-3.2", "modelName": "Deepseek v3.2",
+     "tokenLimits": {"maxInputTokens": 164000, "maxOutputTokens": 64000}},
+    {"modelId": "glm-5", "modelName": "GLM 5",
+     "tokenLimits": {"maxInputTokens": 200000, "maxOutputTokens": 64000}},
+    {"modelId": "qwen3-coder-next", "modelName": "Qwen3 Coder Next",
+     "tokenLimits": {"maxInputTokens": 256000, "maxOutputTokens": 64000}},
+    {"modelId": "minimax-m2.5", "modelName": "MiniMax M2.5",
+     "tokenLimits": {"maxInputTokens": 196000, "maxOutputTokens": 64000}},
+    {"modelId": "minimax-m2.1", "modelName": "MiniMax M2.1",
+     "tokenLimits": {"maxInputTokens": 196000, "maxOutputTokens": 64000}},
 ]
 
 # ==================================================================================================
@@ -634,4 +672,23 @@ def get_kiro_api_host(region: str) -> str:
 def get_kiro_q_host(region: str) -> str:
     """Return Q API host for the specified region."""
     return KIRO_Q_HOST_TEMPLATE.format(region=region)
+
+
+def get_kiro_models_host(region: str) -> str:
+    """
+    Return the host serving /ListAvailableModels for the specified region.
+
+    The runtime host (see KIRO_Q_HOST_TEMPLATE) stopped serving this endpoint and
+    answers HTTP 404, while the CodeWhisperer control-plane host still does.
+    Set KIRO_MODELS_HOST to override the template entirely.
+
+    Args:
+        region: AWS region used for the Q Developer API
+
+    Returns:
+        Base URL without a trailing slash, e.g. "https://codewhisperer.us-east-1.amazonaws.com"
+    """
+    if KIRO_MODELS_HOST_OVERRIDE:
+        return KIRO_MODELS_HOST_OVERRIDE.rstrip("/")
+    return KIRO_MODELS_HOST_TEMPLATE.format(region=region)
 

@@ -2671,3 +2671,56 @@ class TestMessagesConversationIdAffinity:
         print(f"Comparing: {first!r} vs {second!r}")
         assert first != second
         assert len(first) == 36
+
+# =============================================================================
+# Tests for model alias translation (/v1/messages)
+# =============================================================================
+
+def _capture_anthropic_model(client, api_key, model):
+    """
+    Sends a /v1/messages request and returns the model name the route passed to
+    the Kiro converter. The converter is patched, so no upstream request is made.
+    """
+    captured = {}
+
+    def _fake_convert(request_data, conversation_id, profile_arn):
+        captured["model"] = request_data.model
+        return {"conversationState": {"conversationId": conversation_id}}
+
+    with patch("kiro.routes_anthropic.anthropic_to_kiro", side_effect=_fake_convert):
+        client.post(
+            "/v1/messages",
+            headers={"x-api-key": api_key},
+            json={
+                "model": model,
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+        )
+    return captured.get("model")
+
+
+class TestAnthropicModelAlias:
+    """Tests that client-facing aliases are translated before reaching Kiro."""
+
+    def test_alias_is_translated_for_payload(self, test_client, valid_proxy_api_key):
+        """
+        What it does: Verifies "auto-kiro" reaches the converter as "auto".
+        Purpose: Alias support must be identical across API surfaces.
+        """
+        print("Action: POST /v1/messages with model='auto-kiro'...")
+        model = _capture_anthropic_model(test_client, valid_proxy_api_key, "auto-kiro")
+        print(f"Comparing: Expected 'auto', Got {model!r}")
+        assert model == "auto"
+
+    def test_non_alias_model_is_untouched(self, test_client, valid_proxy_api_key):
+        """
+        What it does: Verifies regular model IDs pass through unchanged.
+        Purpose: Alias mapping must not rewrite real model names.
+        """
+        print("Action: POST /v1/messages with model='claude-sonnet-4-5'...")
+        model = _capture_anthropic_model(
+            test_client, valid_proxy_api_key, "claude-sonnet-4-5"
+        )
+        print(f"Comparing: Expected 'claude-sonnet-4-5', Got {model!r}")
+        assert model == "claude-sonnet-4-5"

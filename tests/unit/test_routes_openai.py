@@ -2101,3 +2101,54 @@ class TestChatCompletionsConversationIdAffinity:
         )
         print(f"Comparing: {first!r} vs {second!r}")
         assert first == second == "sess-turn-test"
+
+# =============================================================================
+# Tests for model alias translation (/v1/chat/completions)
+# =============================================================================
+
+def _capture_chat_model(client, api_key, model):
+    """
+    Sends a /v1/chat/completions request and returns the model name the route
+    passed to the Kiro payload builder. The builder is patched, so no upstream
+    request is made.
+    """
+    captured = {}
+
+    def _fake_build(request_data, conversation_id, profile_arn):
+        captured["model"] = request_data.model
+        return {"conversationState": {"conversationId": conversation_id}}
+
+    with patch("kiro.routes_openai.build_kiro_payload", side_effect=_fake_build):
+        client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+        )
+    return captured.get("model")
+
+
+class TestChatCompletionsModelAlias:
+    """Tests that client-facing aliases are translated before reaching Kiro."""
+
+    def test_alias_is_translated_for_payload(self, test_client, valid_proxy_api_key):
+        """
+        What it does: Verifies "auto-kiro" reaches the payload builder as "auto".
+        Purpose: The alias is advertised by /v1/models, so requests must work.
+        """
+        print("Action: POST /v1/chat/completions with model='auto-kiro'...")
+        model = _capture_chat_model(test_client, valid_proxy_api_key, "auto-kiro")
+        print(f"Comparing: Expected 'auto', Got {model!r}")
+        assert model == "auto"
+
+    def test_non_alias_model_is_untouched(self, test_client, valid_proxy_api_key):
+        """
+        What it does: Verifies regular model IDs pass through unchanged.
+        Purpose: Alias mapping must not rewrite real model names.
+        """
+        print("Action: POST /v1/chat/completions with model='claude-sonnet-4-5'...")
+        model = _capture_chat_model(test_client, valid_proxy_api_key, "claude-sonnet-4-5")
+        print(f"Comparing: Expected 'claude-sonnet-4-5', Got {model!r}")
+        assert model == "claude-sonnet-4-5"

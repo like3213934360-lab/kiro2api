@@ -33,7 +33,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 
-from kiro.config import PROFILE_ARN
+from kiro.config import PROFILE_ARN, MODEL_ALIASES
+from kiro.model_resolver import apply_model_alias
 from kiro.models_responses import ResponsesRequest
 from kiro.converters_responses import (
     build_kiro_payload,
@@ -189,6 +190,10 @@ async def responses(request: Request, request_data: ResponsesRequest):
     event sequence (streaming).
     """
     logger.info(f"Request to /v1/responses (model={request_data.model}, stream={request_data.stream})")
+
+    # Translate client-facing aliases (e.g. "auto-kiro" → "auto") before any payload
+    # is built, so Kiro never receives the local alias name.
+    request_data.model = apply_model_alias(request_data.model, MODEL_ALIASES)
 
     messages_for_tokenizer, tools_for_tokenizer = _build_tokenizer_inputs(request_data)
 

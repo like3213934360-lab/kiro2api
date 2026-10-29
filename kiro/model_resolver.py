@@ -84,10 +84,35 @@ class ModelResolution:
     is_verified: bool
 
 
+def apply_model_alias(model_name: str, aliases: Dict[str, str]) -> str:
+    """
+    Translate a client-facing model alias into the real Kiro model ID.
+
+    Aliases exist because some clients reserve model names (Cursor uses "auto",
+    for example) and because users may want short local names. /v1/models exposes
+    the alias names, so every request path must translate them before the Kiro
+    payload is built - otherwise Kiro receives the alias and rejects it.
+
+    Args:
+        model_name: Model name exactly as the client sent it
+        aliases: Mapping of alias name to real Kiro model ID (e.g. MODEL_ALIASES)
+
+    Returns:
+        The real model ID, or the original name when no alias matches
+
+    Examples:
+        >>> apply_model_alias("auto-kiro", {"auto-kiro": "auto"})
+        'auto'
+        >>> apply_model_alias("claude-sonnet-4-5", {"auto-kiro": "auto"})
+        'claude-sonnet-4-5'
+    """
+    return aliases.get(model_name, model_name)
+
+
 def normalize_model_name(name: str) -> str:
     """
     Normalize client model name to Kiro format.
-    
+
     Transformations applied:
     1. claude-haiku-4-5 → claude-haiku-4.5 (dash to dot for minor version)
     2. claude-haiku-4-5-20251001 → claude-haiku-4.5 (strip date suffix)

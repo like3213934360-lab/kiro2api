@@ -227,3 +227,53 @@ class TestResponsesConversationIdAffinity:
         assert captured["conversation_id"] == raw_key
         assert "Conversation cache affinity source: codex_prompt_cache_key" in messages
         assert all(raw_key not in message for message in messages)
+
+
+# =============================================================================
+# Tests for model alias translation (/v1/responses)
+# =============================================================================
+
+def _capture_responses_model(client, api_key, model):
+    """
+    Sends a /v1/responses request and returns the model name the route passed to
+    the Kiro payload builder. The builder is patched, so no upstream request is made.
+    """
+    captured = {}
+
+    def _fake_build(request_data, conversation_id, profile_arn):
+        captured["model"] = request_data.model
+        return {"conversationState": {"conversationId": conversation_id}}
+
+    with patch("kiro.routes_responses.build_kiro_payload", side_effect=_fake_build):
+        client.post(
+            "/v1/responses",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"model": model, "input": "Hello"},
+        )
+    return captured.get("model")
+
+
+class TestResponsesModelAlias:
+    """Tests that client-facing aliases are translated before reaching Kiro."""
+
+    def test_alias_is_translated_for_payload(self, test_client, valid_proxy_api_key):
+        """
+        What it does: Verifies "auto-kiro" reaches the payload builder as "auto".
+        Purpose: Codex CLI must get the same alias behavior as the other surfaces.
+        """
+        print("Action: POST /v1/responses with model='auto-kiro'...")
+        model = _capture_responses_model(test_client, valid_proxy_api_key, "auto-kiro")
+        print(f"Comparing: Expected 'auto', Got {model!r}")
+        assert model == "auto"
+
+    def test_non_alias_model_is_untouched(self, test_client, valid_proxy_api_key):
+        """
+        What it does: Verifies regular model IDs pass through unchanged.
+        Purpose: Alias mapping must not rewrite real model names.
+        """
+        print("Action: POST /v1/responses with model='claude-sonnet-4-5'...")
+        model = _capture_responses_model(
+            test_client, valid_proxy_api_key, "claude-sonnet-4-5"
+        )
+        print(f"Comparing: Expected 'claude-sonnet-4-5', Got {model!r}")
+        assert model == "claude-sonnet-4-5"

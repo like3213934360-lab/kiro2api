@@ -15,7 +15,10 @@ import asyncio
 import json
 import pytest
 import time
+import httpx
+from fastapi import HTTPException
 from pathlib import Path
+from typing import List, Optional
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from kiro.account_manager import (
@@ -23,11 +26,14 @@ from kiro.account_manager import (
     AccountStats,
     ModelAccountList,
     AccountManager,
+    _fetch_model_catalog,
+    _fallback_model_catalog,
     _format_duration
 )
 from kiro.account_errors import ErrorType
 from kiro.auth import KiroAuthManager, AuthType
 from kiro.cache import ModelInfoCache
+from kiro.config import FALLBACK_MODELS
 from kiro.model_resolver import ModelResolver
 
 
@@ -806,10 +812,12 @@ class TestAccountManagerInitializeAccount:
         await manager.load_credentials()
         account_id = str(test_json.resolve())
         
-        # Mock HTTP client to fail
+        # Mock HTTP client to fail with a realistic network error
         with patch('kiro.account_manager.KiroHttpClient') as mock_http_class:
             mock_client = AsyncMock()
-            mock_client.request_with_retry = AsyncMock(side_effect=Exception("Network error"))
+            mock_client.request_with_retry = AsyncMock(
+                side_effect=httpx.ConnectError("Network error")
+            )
             mock_client.close = AsyncMock()
             mock_http_class.return_value = mock_client
             
@@ -820,6 +828,12 @@ class TestAccountManagerInitializeAccount:
         print(f"Initialization success: {success}")
         assert success is True  # Should succeed with fallback
         assert manager._accounts[account_id].model_cache is not None
+
+        print("Verification: built-in catalog was loaded instead of an empty cache...")
+        cached_models = manager._accounts[account_id].model_cache.get_all_model_ids()
+        print(f"Cached models: {len(cached_models)}")
+        assert len(cached_models) == len(FALLBACK_MODELS)
+        assert "auto" in cached_models
 
 
 class TestAccountManagerGetNextAccount:
@@ -1300,3 +1314,244 @@ class TestFormatDuration:
         """Test formatting days."""
         assert _format_duration(86400) == "1d"
         assert _format_duration(172800) == "2d"
+
+
+# =============================================================================
+# Tests for the model catalog fetch (_fetch_model_catalog)
+# =============================================================================
+
+def _make_catalog_auth(
+    models_host: str = "https://catalog.example",
+    q_host: str = "https://q.example",
+    profile_arn: Optional[str] = None
+) -> MagicMock:
+    """Build a minimal auth-manager double exposing the host properties."""
+    auth = MagicMock()
+    auth.models_host = models_host
+    auth.q_host = q_host
+    auth.profile_arn = profile_arn
+    return auth
+
+
+def _make_catalog_response(models: List, profile_arn: Optional[str] = None) -> MagicMock:
+    """Build an httpx-Response-like double for /ListAvailableModels."""
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {"models": models, "profileArn": profile_arn}
+    return response
+
+
+class TestFetchModelCatalog:
+    """
+    Tests for _fetch_model_catalog().
+
+    The runtime host returns 404 for /ListAvailableModels, so the helper must try
+    the control-plane host first and fall back to the Q API host.
+    """
+
+    @pytest.mark.asyncio
+    async def test_uses_catalog_host_first(self):
+        """
+        What it does: Verifies the catalog host is queried before the Q API host.
+        Purpose: This is the fix for /v1/models returning a single model.
+        """
+        print("Setup: auth with distinct catalog/Q hosts...")
+        auth = _make_catalog_auth()
+        urls = []
+
+        async def _fake_request(method, url, json_data, params, stream):
+            urls.append(url)
+            return _make_catalog_response([{"modelId": "claude-sonnet-4.5"}], "arn:aws:x")
+
+        mock_client = AsyncMock()
+        mock_client.request_with_retry = _fake_request
+        mock_client.close = AsyncMock()
+
+        print("Action: _fetch_model_catalog(auth)...")
+        with patch("kiro.account_manager.KiroHttpClient", return_value=mock_client):
+            models, profile_arn = await _fetch_model_catalog(auth)
+
+        print(f"Received models: {models}, profileArn: {profile_arn}")
+        assert models == [{"modelId": "claude-sonnet-4.5"}]
+        assert profile_arn == "arn:aws:x"
+        assert urls == ["https://catalog.example/ListAvailableModels"]
+        mock_client.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_q_host_when_catalog_host_fails(self):
+        """
+        What it does: Verifies failover to the Q API host on catalog-host errors.
+        Purpose: Older/corporate deployments expose /ListAvailableModels elsewhere.
+        """
+        print("Setup: catalog host raises, Q API host answers...")
+        auth = _make_catalog_auth()
+        urls = []
+
+        async def _fake_request(method, url, json_data, params, stream):
+            urls.append(url)
+            if url.startswith("https://catalog.example"):
+                raise HTTPException(status_code=404, detail="Not Found")
+            return _make_catalog_response([{"modelId": "auto"}])
+
+        mock_client = AsyncMock()
+        mock_client.request_with_retry = _fake_request
+        mock_client.close = AsyncMock()
+
+        print("Action: _fetch_model_catalog(auth)...")
+        with patch("kiro.account_manager.KiroHttpClient", return_value=mock_client):
+            models, profile_arn = await _fetch_model_catalog(auth)
+
+        print(f"Attempted hosts: {urls}")
+        assert models == [{"modelId": "auto"}]
+        assert profile_arn is None
+        assert urls == [
+            "https://catalog.example/ListAvailableModels",
+            "https://q.example/ListAvailableModels"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_raises_when_every_host_fails(self):
+        """
+        What it does: Verifies RuntimeError when no host answers.
+        Purpose: Callers must be able to detect exhaustion and use the fallback list.
+        """
+        print("Setup: every host raises ConnectError...")
+        auth = _make_catalog_auth()
+
+        async def _fake_request(method, url, json_data, params, stream):
+            raise httpx.ConnectError("dns failure")
+
+        mock_client = AsyncMock()
+        mock_client.request_with_retry = _fake_request
+        mock_client.close = AsyncMock()
+
+        print("Action: _fetch_model_catalog(auth) expecting RuntimeError...")
+        with patch("kiro.account_manager.KiroHttpClient", return_value=mock_client):
+            with pytest.raises(RuntimeError) as exc_info:
+                await _fetch_model_catalog(auth)
+
+        print(f"Raised: {exc_info.value}")
+        print("Verification: both hosts are reported in the message...")
+        assert "catalog.example" in str(exc_info.value)
+        assert "q.example" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_raises_on_empty_catalog(self):
+        """
+        What it does: Verifies an empty "models" array is treated as a failure.
+        Purpose: An empty catalog means "unknown", not "no models available".
+        """
+        print("Setup: every host answers with an empty catalog...")
+        auth = _make_catalog_auth()
+
+        async def _fake_request(method, url, json_data, params, stream):
+            return _make_catalog_response([])
+
+        mock_client = AsyncMock()
+        mock_client.request_with_retry = _fake_request
+        mock_client.close = AsyncMock()
+
+        print("Action: _fetch_model_catalog(auth) expecting RuntimeError...")
+        with patch("kiro.account_manager.KiroHttpClient", return_value=mock_client):
+            with pytest.raises(RuntimeError) as exc_info:
+                await _fetch_model_catalog(auth)
+
+        print(f"Raised: {exc_info.value}")
+        assert "empty model list" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_duplicate_hosts_are_queried_once(self):
+        """
+        What it does: Verifies the same host is not retried twice.
+        Purpose: Some deployments use one host for both roles; avoid double traffic.
+        """
+        print("Setup: catalog and Q hosts are identical...")
+        auth = _make_catalog_auth(
+            models_host="https://same.example",
+            q_host="https://same.example"
+        )
+        urls = []
+
+        async def _fake_request(method, url, json_data, params, stream):
+            urls.append(url)
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        mock_client = AsyncMock()
+        mock_client.request_with_retry = _fake_request
+        mock_client.close = AsyncMock()
+
+        print("Action: _fetch_model_catalog(auth) expecting RuntimeError...")
+        with patch("kiro.account_manager.KiroHttpClient", return_value=mock_client):
+            with pytest.raises(RuntimeError):
+                await _fetch_model_catalog(auth)
+
+        print(f"Attempted hosts: {urls}")
+        assert urls == ["https://same.example/ListAvailableModels"]
+
+    @pytest.mark.asyncio
+    async def test_profile_arn_is_sent_only_when_present(self):
+        """
+        What it does: Verifies profileArn is forwarded as a query parameter.
+        Purpose: Kiro requires profileArn for accounts that have one, and rejects
+                 it being absent for those accounts.
+        """
+        print("Setup: auth with a profile ARN...")
+        auth = _make_catalog_auth(profile_arn="arn:aws:codewhisperer:us-east-1:1:profile/X")
+        captured_params = {}
+
+        async def _fake_request(method, url, json_data, params, stream):
+            captured_params.update(params)
+            return _make_catalog_response([{"modelId": "auto"}])
+
+        mock_client = AsyncMock()
+        mock_client.request_with_retry = _fake_request
+        mock_client.close = AsyncMock()
+
+        print("Action: _fetch_model_catalog(auth)...")
+        with patch("kiro.account_manager.KiroHttpClient", return_value=mock_client):
+            await _fetch_model_catalog(auth)
+
+        print(f"Params sent: {captured_params}")
+        assert captured_params["origin"] == "AI_EDITOR"
+        assert captured_params["profileArn"] == "arn:aws:codewhisperer:us-east-1:1:profile/X"
+
+
+class TestFallbackModelCatalog:
+    """Tests for _fallback_model_catalog()."""
+
+    def test_returns_defensive_copy(self):
+        """
+        What it does: Verifies mutating the returned list does not touch FALLBACK_MODELS.
+        Purpose: A per-account cache must never corrupt the module-level catalog.
+        """
+        print("Action: _fallback_model_catalog() twice...")
+        first = _fallback_model_catalog()
+        second = _fallback_model_catalog()
+
+        print("Mutation: appending to the first copy...")
+        first.append({"modelId": "bogus"})
+
+        print(f"Comparing lengths: {len(first)} vs {len(FALLBACK_MODELS)}")
+        assert len(first) == len(FALLBACK_MODELS) + 1
+        assert len(second) == len(FALLBACK_MODELS)
+
+    def test_contains_known_current_models(self):
+        """
+        What it does: Verifies the catalog carries the models users actually get.
+        Purpose: A stale list silently hides new models from every client.
+        """
+        print("Action: _fallback_model_catalog()...")
+        model_ids = {model["modelId"] for model in _fallback_model_catalog()}
+
+        print(f"Catalog: {sorted(model_ids)}")
+        for expected in (
+            "auto",
+            "claude-opus-5.5",
+            "claude-sonnet-5.5",
+            "claude-haiku-5.5",
+            "claude-sonnet-4.6",
+            "kimi-k3",
+            "qwen3-coder-next",
+        ):
+            print(f"Verification: {expected} present...")
+            assert expected in model_ids

@@ -18,6 +18,7 @@ from kiro.model_resolver import (
     normalize_model_name,
     get_model_id_for_kiro,
     extract_model_family,
+    apply_model_alias,
     ModelResolver,
     ModelResolution,
 )
@@ -1738,3 +1739,75 @@ class TestAliasSystemSecurity:
         print(f"Received suggestions: {suggestions}")
         # This is expected behavior - alias name doesn't contain family
         assert len(suggestions) > 0
+
+
+class TestApplyModelAlias:
+    """
+    Tests for apply_model_alias() - the helper used by every API route to map
+    client-facing alias names (e.g. "auto-kiro") onto real Kiro model IDs.
+    """
+
+    def test_alias_is_replaced_with_target_model(self):
+        """
+        What it does: Verifies an alias resolves to its configured target.
+        Purpose: Clients see alias names in /v1/models, so requests using them
+                 must reach Kiro with the real model ID.
+        """
+        print("Setup: aliases = {'auto-kiro': 'auto'}...")
+        aliases = {"auto-kiro": "auto"}
+
+        print("Action: apply_model_alias('auto-kiro', aliases)...")
+        result = apply_model_alias("auto-kiro", aliases)
+
+        print(f"Comparing: Expected 'auto', Got {result!r}")
+        assert result == "auto"
+
+    def test_unknown_model_is_returned_unchanged(self):
+        """
+        What it does: Verifies non-alias names are untouched.
+        Purpose: The gateway must not rewrite model names it does not know.
+        """
+        print("Action: apply_model_alias('claude-sonnet-4-5', aliases)...")
+        result = apply_model_alias("claude-sonnet-4-5", {"auto-kiro": "auto"})
+
+        print(f"Comparing: Expected 'claude-sonnet-4-5', Got {result!r}")
+        assert result == "claude-sonnet-4-5"
+
+    def test_empty_alias_map_is_no_op(self):
+        """
+        What it does: Verifies an empty alias map changes nothing.
+        Purpose: Default deployments without aliases behave exactly as before.
+        """
+        print("Action: apply_model_alias('auto', {})...")
+        result = apply_model_alias("auto", {})
+
+        print(f"Comparing: Expected 'auto', Got {result!r}")
+        assert result == "auto"
+
+    def test_alias_lookup_is_exact_and_case_sensitive(self):
+        """
+        What it does: Verifies partial/case-variant names are not matched.
+        Purpose: Prevent accidental rewrites such as 'auto-kiro-v2' → 'auto'.
+        """
+        print("Setup: aliases = {'auto-kiro': 'auto'}...")
+        aliases = {"auto-kiro": "auto"}
+
+        print("Action: apply_model_alias('auto-kiro-v2', aliases)...")
+        assert apply_model_alias("auto-kiro-v2", aliases) == "auto-kiro-v2"
+
+        print("Action: apply_model_alias('AUTO-KIRO', aliases)...")
+        assert apply_model_alias("AUTO-KIRO", aliases) == "AUTO-KIRO"
+
+    def test_chained_alias_is_resolved_once(self):
+        """
+        What it does: Verifies aliases are not applied recursively.
+        Purpose: A misconfigured chain (a→b, b→c) must not loop or double-hop.
+        """
+        print("Setup: aliases = {'a': 'b', 'b': 'c'}...")
+        aliases = {"a": "b", "b": "c"}
+
+        print("Action: apply_model_alias('a', aliases)...")
+        result = apply_model_alias("a", aliases)
+
+        print(f"Comparing: Expected 'b' (single hop), Got {result!r}")
+        assert result == "b"

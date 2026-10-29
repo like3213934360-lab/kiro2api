@@ -35,7 +35,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from loguru import logger
 
-from kiro.config import PROXY_API_KEY, PROFILE_ARN
+from kiro.config import PROXY_API_KEY, PROFILE_ARN, MODEL_ALIASES
+from kiro.model_resolver import apply_model_alias
 from kiro.models_anthropic import (
     AnthropicMessagesRequest,
     AnthropicCountTokensRequest,
@@ -171,6 +172,10 @@ async def messages(
         HTTPException: On validation or API errors
     """
     logger.info(f"Request to /v1/messages (model={request_data.model}, stream={request_data.stream})")
+
+    # Translate client-facing aliases (e.g. "auto-kiro" → "auto") before any payload
+    # is built, so Kiro never receives the local alias name.
+    request_data.model = apply_model_alias(request_data.model, MODEL_ALIASES)
     
     if anthropic_version:
         logger.debug(f"Anthropic-Version header: {anthropic_version}")
@@ -973,6 +978,9 @@ async def count_tokens_endpoint(
         HTTPException: 401 if authentication fails (handled by dependency)
     """
     logger.info(f"Request to /v1/messages/count_tokens (model={request_data.model}, messages={len(request_data.messages)})")
+
+    # Keep token accounting consistent with /v1/messages (alias → real model ID)
+    request_data.model = apply_model_alias(request_data.model, MODEL_ALIASES)
     
     # Prepare data for tokenizer (same format as streaming message_start)
     messages_for_tokenizer = [msg.model_dump() for msg in request_data.messages]

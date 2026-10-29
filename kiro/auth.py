@@ -50,6 +50,7 @@ from kiro.config import (
     get_kiro_refresh_url,
     get_kiro_api_host,
     get_kiro_q_host,
+    get_kiro_models_host,
     get_aws_sso_oidc_url,
 )
 from kiro.utils import get_machine_fingerprint
@@ -275,14 +276,19 @@ class KiroAuthManager:
         else:
             self._api_host = get_kiro_api_host(final_api_region)
             self._q_host = get_kiro_q_host(final_api_region)
-        
+
+        # Catalog host is independent from the API/Q API host: the runtime host
+        # no longer serves /ListAvailableModels (HTTP 404), the control-plane host does.
+        self._models_host = get_kiro_models_host(final_api_region)
+
         # Log initialized endpoints for diagnostics (helps with DNS issues like #58, #132, #133)
         logger.info(
             f"Auth manager initialized: "
             f"sso_region={sso_region_for_oidc}, "
             f"api_region={final_api_region}, "
             f"api_host={self._api_host}, "
-            f"q_host={self._q_host}"
+            f"q_host={self._q_host}, "
+            f"models_host={self._models_host}"
         )
     
     def _detect_auth_type(self) -> None:
@@ -1028,6 +1034,11 @@ class KiroAuthManager:
     def q_host(self) -> str:
         """Q API host for the current region."""
         return self._q_host
+
+    @property
+    def models_host(self) -> str:
+        """Host serving /ListAvailableModels (model catalog) for the current region."""
+        return self._models_host
     
     @property
     def fingerprint(self) -> str:

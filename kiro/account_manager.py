@@ -41,9 +41,10 @@ import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
+from fastapi import HTTPException
 from loguru import logger
 
 from kiro.auth import KiroAuthManager, AuthType
@@ -65,22 +66,78 @@ from kiro.account_errors import ErrorType
 from kiro.http_client import KiroHttpClient
 
 
-def _is_runtime_endpoint(auth_manager: KiroAuthManager) -> bool:
+def _fallback_model_catalog() -> List[Dict[str, Any]]:
     """
-    Check if auth manager uses runtime endpoint that doesn't provide /ListAvailableModels.
+    Return a fresh copy of the built-in model catalog.
 
-    Runtime endpoint pattern: https://runtime.{region}.kiro.dev
-    Old endpoint pattern: https://q.{region}.amazonaws.com
+    Used when the live /ListAvailableModels call fails or returns nothing, so that
+    /v1/models is never empty and clients can still pick a model.
 
-    NOTE: runtime.kiro.dev DOES support /ListAvailableModels, always attempt dynamic fetch.
+    Returns:
+        List of model dictionaries in the /ListAvailableModels shape.
     """
-    return False
+    return [dict(model) for model in FALLBACK_MODELS]
+
+
+async def _fetch_model_catalog(
+    auth_manager: KiroAuthManager
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """
+    Fetch the model catalog from Kiro's /ListAvailableModels endpoint.
+
+    The runtime host used for chat requests answers HTTP 404 for this endpoint, so
+    the dedicated catalog host (control plane) is tried first and the Q API host is
+    kept as a fallback for older/corporate deployments.
+
+    Args:
+        auth_manager: Auth manager of the account whose catalog is requested
+
+    Returns:
+        Tuple of (models, profile_arn). ``profile_arn`` is the value advertised by
+        the response, or None when the response did not include one.
+
+    Raises:
+        RuntimeError: When every candidate host failed or returned an empty catalog.
+    """
+    params: Dict[str, str] = {"origin": "AI_EDITOR"}
+    if auth_manager.profile_arn:
+        params["profileArn"] = auth_manager.profile_arn
+
+    hosts: List[str] = []
+    for host in (auth_manager.models_host, auth_manager.q_host):
+        if host and host not in hosts:
+            hosts.append(host)
+
+    failures: List[str] = []
+    for host in hosts:
+        http_client = KiroHttpClient(auth_manager, shared_client=None)
+        try:
+            response = await http_client.request_with_retry(
+                method="GET",
+                url=f"{host}/ListAvailableModels",
+                json_data=None,
+                params=params,
+                stream=False
+            )
+            data = response.json()
+            models = data.get("models") or []
+            if models:
+                logger.info(f"Fetched {len(models)} models from {host}")
+                return models, data.get("profileArn")
+            failures.append(f"{host}: empty model list")
+        except (HTTPException, httpx.HTTPError, ValueError) as e:
+            failures.append(f"{host}: {e}")
+            logger.debug(f"Model catalog fetch failed via {host}: {e}")
+        finally:
+            await http_client.close()
+
+    raise RuntimeError("; ".join(failures) or "no catalog host available")
 
 
 def _format_duration(seconds: float) -> str:
     """
     Format duration in human-readable format.
-    
+
     Args:
         seconds: Duration in seconds
     
@@ -498,47 +555,24 @@ class AccountManager:
                 except Exception as e:
                     logger.warning(f"Account {account_id}: failed to obtain profileArn via force refresh: {e}")
 
-            # Determine if we should fetch models or use static list
-            if _is_runtime_endpoint(auth_manager):
-                models_list = []
-            else:
-                # Old endpoint - attempt to fetch dynamic model list
-                # Fetch models list with retry + fallback
-                params = {"origin": "AI_EDITOR"}
-                if auth_manager.profile_arn:
-                    params["profileArn"] = auth_manager.profile_arn
+            # Fetch the live model catalog; the helper handles host fallback,
+            # retries and returns an empty list only when every host failed.
+            models_list: List[Dict[str, Any]] = []
+            try:
+                models_list, listed_profile_arn = await _fetch_model_catalog(auth_manager)
+                # Capture profileArn if returned in response and not already set
+                if not auth_manager.profile_arn and listed_profile_arn:
+                    auth_manager._profile_arn = listed_profile_arn
+                    logger.info(f"Account {account_id}: profileArn obtained from ListAvailableModels response")
+            except RuntimeError as e:
+                logger.error(f"Failed to fetch models for {account_id} after retries: {e}")
 
-                list_models_url = f"{auth_manager.q_host}/ListAvailableModels"
-
-                # Use KiroHttpClient for retry logic (3 attempts with exponential backoff)
-                http_client = KiroHttpClient(auth_manager, shared_client=None)
-
-                try:
-                    response = await http_client.request_with_retry(
-                        method="GET",
-                        url=list_models_url,
-                        json_data=None,
-                        params=params,
-                        stream=False
-                    )
-
-                    if response.status_code == 200:
-                        data = response.json()
-                        models_list = data.get("models", [])
-                        # Capture profileArn if returned in response and not already set
-                        if not auth_manager.profile_arn and data.get("profileArn"):
-                            auth_manager._profile_arn = data["profileArn"]
-                            logger.info(f"Account {account_id}: profileArn obtained from ListAvailableModels response")
-                    else:
-                        # Shouldn't happen (retry handles non-200), but keep for safety
-                        raise Exception(f"HTTP {response.status_code}")
-
-                except Exception as e:
-                    logger.error(f"Failed to fetch models for {account_id} after retries: {e}")
-                    models_list = []
-
-                finally:
-                    await http_client.close()
+            if not models_list:
+                models_list = _fallback_model_catalog()
+                logger.warning(
+                    f"Account {account_id}: using built-in model catalog "
+                    f"({len(models_list)} models) because the live catalog is unavailable"
+                )
             
             # Create model cache and update
             model_cache = ModelInfoCache()
@@ -588,60 +622,45 @@ class AccountManager:
         account = self._accounts.get(account_id)
         if not account or not account.auth_manager:
             return
-        
-        # Check if using runtime endpoint (no dynamic model list available)
-        if _is_runtime_endpoint(account.auth_manager):
-            await account.model_cache.update([])
-            account.models_cached_at = time.time()
-            self._dirty = True
-            return
-        
-        # Old endpoint - attempt to fetch dynamic model list
-        # Use KiroHttpClient for retry logic
-        http_client = KiroHttpClient(account.auth_manager, shared_client=None)
-        
-        try:
-            params = {"origin": "AI_EDITOR"}
-            if account.auth_manager.profile_arn:
-                params["profileArn"] = account.auth_manager.profile_arn
-            
-            list_models_url = f"{account.auth_manager.q_host}/ListAvailableModels"
-            
-            response = await http_client.request_with_retry(
-                method="GET",
-                url=list_models_url,
-                json_data=None,
-                params=params,
-                stream=False
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                models_list = data.get("models", [])
-                # Capture profileArn if returned and not already set
-                if not account.auth_manager.profile_arn and data.get("profileArn"):
-                    account.auth_manager._profile_arn = data["profileArn"]
-                    logger.info(f"Account {account_id}: profileArn obtained from ListAvailableModels response (refresh)")
-                await account.model_cache.update(models_list)
-                account.models_cached_at = time.time()
 
-                # Update model_to_accounts mapping (new models may have appeared)
-                available_models = account.model_resolver.get_available_models()
-                for model in available_models:
-                    if model not in self._model_to_accounts:
-                        self._model_to_accounts[model] = ModelAccountList()
-                    if account_id not in self._model_to_accounts[model].accounts:
-                        self._model_to_accounts[model].accounts.append(account_id)
-                
-                logger.debug(f"Refreshed models for {account_id}")
-                self._dirty = True
-        
-        except Exception as e:
-            # All retries exhausted - keep using stale cache
+        # Attempt to fetch the live model catalog (host fallback handled inside)
+        models_list: List[Dict[str, Any]] = []
+        try:
+            models_list, listed_profile_arn = await _fetch_model_catalog(account.auth_manager)
+            # Capture profileArn if returned and not already set
+            if not account.auth_manager.profile_arn and listed_profile_arn:
+                account.auth_manager._profile_arn = listed_profile_arn
+                logger.info(f"Account {account_id}: profileArn obtained from ListAvailableModels response (refresh)")
+        except RuntimeError as e:
+            # All hosts exhausted - keep using the stale cache below
             logger.warning(f"Failed to refresh models for {account_id} after retries: {e}")
-        
-        finally:
-            await http_client.close()
+
+        if not models_list:
+            if account.model_cache.get_all_model_ids():
+                logger.debug(f"Keeping stale model cache for {account_id}")
+                # Reset the TTL so a failing catalog endpoint is not hammered on
+                # every single request (get_next_account refreshes on TTL expiry).
+                account.models_cached_at = time.time()
+                return
+            models_list = _fallback_model_catalog()
+            logger.warning(
+                f"Account {account_id}: using built-in model catalog "
+                f"({len(models_list)} models) because the live catalog is unavailable"
+            )
+
+        await account.model_cache.update(models_list)
+        account.models_cached_at = time.time()
+
+        # Update model_to_accounts mapping (new models may have appeared)
+        available_models = account.model_resolver.get_available_models()
+        for model in available_models:
+            if model not in self._model_to_accounts:
+                self._model_to_accounts[model] = ModelAccountList()
+            if account_id not in self._model_to_accounts[model].accounts:
+                self._model_to_accounts[model].accounts.append(account_id)
+
+        logger.debug(f"Refreshed models for {account_id}")
+        self._dirty = True
     
     async def get_next_account(self, model: str, exclude_accounts: Optional[set] = None) -> Optional[Account]:
         """

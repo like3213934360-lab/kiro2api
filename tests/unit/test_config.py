@@ -1023,3 +1023,55 @@ class TestConversationCacheAffinityConfig:
 
         print(f"Comparing: Expected False, Got {config_module.CONVERSATION_CACHE_AFFINITY}")
         assert config_module.CONVERSATION_CACHE_AFFINITY is False
+
+class TestModelsCatalogHostConfig:
+    """Tests for the /ListAvailableModels host configuration."""
+
+    def test_default_catalog_host_is_control_plane(self):
+        """
+        What it does: Verifies the default catalog host is the CodeWhisperer host.
+        Purpose: runtime.{region}.kiro.dev answers 404 for /ListAvailableModels,
+                 which left /v1/models showing almost nothing.
+        """
+        print("Setup: Importing get_kiro_models_host...")
+        from kiro.config import get_kiro_models_host
+
+        print("Action: get_kiro_models_host('us-east-1')...")
+        host = get_kiro_models_host("us-east-1")
+        print(f"Received: {host}")
+
+        print("Verification: host points at the control plane...")
+        assert host == "https://codewhisperer.us-east-1.amazonaws.com"
+
+    def test_catalog_host_uses_region(self):
+        """
+        What it does: Verifies the region is substituted into the template.
+        Purpose: Non-us-east-1 accounts must reach their own control plane.
+        """
+        print("Setup: Importing get_kiro_models_host...")
+        from kiro.config import get_kiro_models_host
+
+        print("Action: get_kiro_models_host('eu-central-1')...")
+        host = get_kiro_models_host("eu-central-1")
+
+        print(f"Received: {host}")
+        assert "eu-central-1" in host
+
+    def test_catalog_host_override_is_respected(self, monkeypatch):
+        """
+        What it does: Verifies KIRO_MODELS_HOST overrides the template.
+        Purpose: Corporate proxies need to point the catalog at their own gateway.
+        """
+        print("Setup: Overriding KIRO_MODELS_HOST_OVERRIDE...")
+        import kiro.config as config_module
+
+        monkeypatch.setattr(
+            config_module, "KIRO_MODELS_HOST_OVERRIDE", "https://mirror.local/"
+        )
+
+        print("Action: get_kiro_models_host('us-east-1')...")
+        host = config_module.get_kiro_models_host("us-east-1")
+
+        print(f"Received: {host}")
+        print("Verification: trailing slash stripped, region ignored...")
+        assert host == "https://mirror.local"

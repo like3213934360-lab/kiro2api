@@ -41,6 +41,7 @@ from kiro.config import (
     PROXY_API_KEY,
     APP_VERSION,
     PROFILE_ARN,
+    MODEL_ALIASES,
 )
 from kiro.models_openai import (
     OpenAIModel,
@@ -49,7 +50,7 @@ from kiro.models_openai import (
 )
 from kiro.auth import KiroAuthManager, AuthType
 from kiro.cache import ModelInfoCache
-from kiro.model_resolver import ModelResolver
+from kiro.model_resolver import ModelResolver, apply_model_alias
 from kiro.converters_openai import build_kiro_payload
 from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response, stream_with_first_token_retry
 from kiro.http_client import KiroHttpClient
@@ -318,6 +319,10 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         HTTPException: On validation or API errors
     """
     logger.info(f"Request to /v1/chat/completions (model={request_data.model}, stream={request_data.stream})")
+
+    # Translate client-facing aliases (e.g. "auto-kiro" → "auto") before any payload
+    # is built, so Kiro never receives the local alias name.
+    request_data.model = apply_model_alias(request_data.model, MODEL_ALIASES)
     
     # Note: prepare_new_request() and log_request_body() are now called by DebugLoggerMiddleware
     # This ensures debug logging works even for requests that fail Pydantic validation (422 errors)
