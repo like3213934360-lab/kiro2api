@@ -269,12 +269,12 @@ async def responses(request: Request, request_data: ResponsesRequest):
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
-            try:
-                kiro_request_body = json.dumps(kiro_payload, ensure_ascii=False, indent=2).encode("utf-8")
-                if debug_logger:
+            if debug_logger:
+                try:
+                    kiro_request_body = json.dumps(kiro_payload, ensure_ascii=False, indent=2).encode("utf-8")
                     debug_logger.log_kiro_request_body(kiro_request_body)
-            except Exception as e:
-                logger.warning(f"Failed to log Kiro request: {e}")
+                except Exception as e:
+                    logger.warning(f"Failed to log Kiro request: {e}")
 
             # Cache-hit diagnosis: shows which prefix component changes per turn
             logger.info(f"[CachePrefix] {summarize_cache_prefix(kiro_payload)}")
@@ -416,12 +416,12 @@ async def responses(request: Request, request_data: ResponsesRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    try:
-        kiro_request_body = json.dumps(kiro_payload, ensure_ascii=False, indent=2).encode("utf-8")
-        if debug_logger:
+    if debug_logger:
+        try:
+            kiro_request_body = json.dumps(kiro_payload, ensure_ascii=False, indent=2).encode("utf-8")
             debug_logger.log_kiro_request_body(kiro_request_body)
-    except Exception as e:
-        logger.warning(f"Failed to log Kiro request: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to log Kiro request: {e}")
 
     # Cache-hit diagnosis: shows which prefix component changes per turn
     logger.info(f"[CachePrefix] {summarize_cache_prefix(kiro_payload)}")
@@ -430,6 +430,8 @@ async def responses(request: Request, request_data: ResponsesRequest):
     logger.debug(f"Kiro API URL: {url}")
 
     if request_data.stream:
+        # Streaming mode: per-request client prevents orphaned connections
+        # when network interface changes (VPN disconnect/reconnect)
         http_client = KiroHttpClient(auth_manager, shared_client=None)
     else:
         shared_client = request.app.state.http_client

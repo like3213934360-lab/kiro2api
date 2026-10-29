@@ -435,17 +435,19 @@ def summarize_cache_prefix(payload: Dict[str, Any]) -> str:
         encoded = json.dumps(value, default=str, ensure_ascii=False).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()[:8]
 
-    first_history_digest = _digest(history[0]) if history else "none"
-
-    # The gateway prepends the system prompt to the first history message, so its
-    # head is the system prompt. Tracking head and whole separately shows whether
-    # the system prompt itself changed or only the first user message.
+    # Hashing the whole first history entry would serialize a potentially
+    # 100K+ char message on every request just for a log line. Hash the first
+    # 4K plus the length instead: enough to notice a changed prefix or size.
+    first_history_digest = "none"
     head_digest = "none"
     if history:
         first = history[0]
         role_key = "userInputMessage" if "userInputMessage" in first else "assistantResponseMessage"
         content = (first.get(role_key) or {}).get("content") or ""
+        if not isinstance(content, str):
+            content = json.dumps(content, default=str, ensure_ascii=False)
         head_digest = hashlib.sha256(content[:4096].encode("utf-8")).hexdigest()[:8]
+        first_history_digest = f"{head_digest}:{len(content)}"
 
     return (
         f"history_len={len(history)}, "

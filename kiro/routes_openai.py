@@ -482,13 +482,14 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             
-            # Log Kiro payload
-            try:
-                kiro_request_body = json.dumps(kiro_payload, ensure_ascii=False, indent=2).encode('utf-8')
-                if debug_logger:
+            # Log Kiro payload (only when debug logging is enabled; serializing
+            # a 300K-token payload on every request costs real CPU time).
+            if debug_logger:
+                try:
+                    kiro_request_body = json.dumps(kiro_payload, ensure_ascii=False, indent=2).encode('utf-8')
                     debug_logger.log_kiro_request_body(kiro_request_body)
-            except Exception as e:
-                logger.warning(f"Failed to log Kiro request: {e}")
+                except Exception as e:
+                    logger.warning(f"Failed to log Kiro request: {e}")
 
             # Cache-hit diagnosis: shows which prefix component changes per turn
             logger.info(f"[CachePrefix] {summarize_cache_prefix(kiro_payload)}")
@@ -498,7 +499,10 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             logger.debug(f"Kiro API URL: {url} (account: {account.id})")
             
             if request_data.stream:
-                http_client = KiroHttpClient(auth_manager, shared_client=None)
+                http_client = KiroHttpClient(
+                    auth_manager,
+                    shared_client=request.app.state.http_client,
+                )
             else:
                 shared_client = request.app.state.http_client
                 http_client = KiroHttpClient(auth_manager, shared_client=shared_client)
@@ -738,13 +742,14 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     
-    # Log Kiro payload
-    try:
-        kiro_request_body = json.dumps(kiro_payload, ensure_ascii=False, indent=2).encode('utf-8')
-        if debug_logger:
+    # Log Kiro payload (only when debug logging is enabled; serializing
+    # a 300K-token payload on every request costs real CPU time).
+    if debug_logger:
+        try:
+            kiro_request_body = json.dumps(kiro_payload, ensure_ascii=False, indent=2).encode('utf-8')
             debug_logger.log_kiro_request_body(kiro_request_body)
-    except Exception as e:
-        logger.warning(f"Failed to log Kiro request: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to log Kiro request: {e}")
 
     # Cache-hit diagnosis: shows which prefix component changes per turn
     logger.info(f"[CachePrefix] {summarize_cache_prefix(kiro_payload)}")
