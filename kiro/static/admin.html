@@ -124,6 +124,7 @@
         <h2>Credits 用量</h2>
         <button class="sm ghost" onclick="loadCredits()">查询</button>
       </div>
+      <div class="hint" style="margin-bottom:8px">超额开启后，超出套餐额度会按 Kiro 费率（当前约 $0.04/credit）计费；下方会显示超额上限、已超额数量和费用。</div>
       <div class="msg" id="creditsMsg"></div>
       <div id="creditsBody" class="accounts"></div>
     </div>
@@ -269,6 +270,23 @@ function shortAcct(id) {
 }
 
 // ---- Credits ----
+async function setOverage(accountId, enabled) {
+  const msg = enabled
+    ? '开启超额后，超出套餐额度会按 Kiro 费率产生额外费用（当前约 $0.04/credit）。确定开启？'
+    : '关闭超额后，超出套餐额度将无法继续使用。确定关闭？';
+  if (!confirm(msg)) return;
+  const { ok, data } = await api('/admin/overage', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId, enabled })
+  });
+  if (ok) {
+    show('creditsMsg', enabled ? '已开启超额' : '已关闭超额', true);
+    await loadCredits();
+  } else {
+    show('creditsMsg', typeof data.detail === 'string' ? data.detail : '操作失败', false);
+  }
+}
+
 async function loadCredits() {
   show('creditsMsg', '查询中…', true);
   const { ok, data } = await api('/admin/credits');
@@ -289,6 +307,20 @@ async function loadCredits() {
     const sub = d.subscriptionInfo || {};
     let html = `<div class="kv"><span class="k">${shortAcct(acct.accountId)}</span><span class="v">${sub.subscriptionTitle||'Unknown'}</span></div>`;
     if (d.nextDateReset) html += `<div class="kv"><span class="k">重置日期</span><span class="v">${new Date(d.nextDateReset*1000).toLocaleDateString()}</span></div>`;
+    const oc = d.overageConfiguration || {};
+    const overageEnabled = (oc.overageStatus || (d.overageSettings||{}).overageStatus) === 'ENABLED';
+    const overageCapable = sub.overageCapability === 'OVERAGE_CAPABLE';
+    if (overageCapable) {
+      const overageBadge = overageEnabled
+        ? '<span class="badge ok">超额已开启</span>'
+        : '<span class="badge warn">超额未开启</span>';
+      const overageBtn = overageEnabled
+        ? `<button class="sm ghost" onclick='setOverage(${JSON.stringify(acct.accountId)}, false)'>关闭超额</button>`
+        : `<button class="sm" onclick='setOverage(${JSON.stringify(acct.accountId)}, true)'>开启超额</button>`;
+      html += `<div class="kv"><span class="k">超额</span><span class="v">${overageBadge} ${overageBtn}</span></div>`;
+    } else {
+      html += `<div class="kv"><span class="k">超额</span><span class="v"><span class="badge">不支持</span></span></div>`;
+    }
     for (const b of (d.usageBreakdownList||[])) {
       const used  = b.currentUsageWithPrecision ?? b.currentUsage ?? 0;
       const limit = b.usageLimitWithPrecision  ?? b.usageLimit   ?? 0;
@@ -305,6 +337,20 @@ async function loadCredits() {
       }
       html += `<div class="kv"><span class="k">${name}</span><span class="v">${fmtNum(used)} / ${fmtNum(limit)}${rem!==null?' (剩 '+fmtNum(rem)+')':''}</span></div>
         <div class="bar${cls}"><i style="width:${pct}%"></i></div>${extra}`;
+      const overageCap = b.overageCapWithPrecision ?? b.overageCap;
+      const currentOverages = b.currentOveragesWithPrecision ?? b.currentOverages;
+      const overageRate = b.overageRate;
+      const overageCharges = b.overageCharges;
+      if (overageCap !== undefined || currentOverages !== undefined) {
+        const unit = b.unit || 'unit';
+        if (currentOverages > 0) {
+          html += `<div class="kv"><span class="k" style="color:var(--warn)">已超额</span><span class="v">${fmtNum(currentOverages)} / ${fmtNum(overageCap)} ${unit} · 费用 $${fmtNum(overageCharges)} @ $${fmtNum(overageRate)}/${unit}</span></div>`;
+        } else if (overageEnabled) {
+          html += `<div class="kv"><span class="k">超额上限</span><span class="v">${fmtNum(overageCap)} ${unit} · $${fmtNum(overageRate)}/${unit}</span></div>`;
+        } else {
+          html += `<div class="kv"><span class="k">超额上限</span><span class="v">${fmtNum(overageCap)} ${unit}（未开启）</span></div>`;
+        }
+      }
     }
     if (!(d.usageBreakdownList||[]).length)
       html += '<div class="kv"><span class="k">无用量数据</span><span class="v">企业账号或新账号可能不返回</span></div>';

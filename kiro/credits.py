@@ -36,6 +36,7 @@ KiroTokenShare project.
 
 import asyncio
 import time
+import uuid
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
@@ -45,6 +46,11 @@ from kiro.config import CREDITS_CACHE_TTL, KIRO_IDE_VERSION
 
 # Kiro management endpoint template (control plane, not the runtime API)
 MANAGEMENT_URL_TEMPLATE = "https://management.{region}.kiro.dev/getUsageLimits"
+
+# Subscription preference endpoint used to enable/disable paid overage.
+# Same request shape as KiroAccountManager's setUserPreference().
+Q_PREFERENCE_URL_TEMPLATE = "https://q.{region}.amazonaws.com/setUserPreference"
+KIRO_SUBSCRIPTION_VERSION = "0.12.155"
 
 
 def provider_to_idp(provider: Optional[str]) -> str:
@@ -196,6 +202,80 @@ class CreditsService:
             except Exception as e:
                 return None, f"Failed to parse Kiro response: {e}"
             return data, None
+        finally:
+            if owns_client:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+
+    async def set_overage(
+        self,
+        account_id: str,
+        auth_manager,
+        enabled: bool,
+        http_client: Optional[httpx.AsyncClient] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Enable or disable paid overage for an account.
+
+        Calls Kiro's ``setUserPreference`` endpoint:
+
+            POST https://q.{region}.amazonaws.com/setUserPreference
+            {"overageConfiguration": {"overageStatus": "ENABLED"}}
+
+        Returns (success, error_message).
+        """
+        try:
+            token = await auth_manager.get_access_token()
+        except Exception as e:
+            return False, f"Failed to obtain access token: {e}"
+
+        profile_arn = auth_manager.profile_arn or ""
+        region = region_from_profile_arn(profile_arn) or auth_manager.region or "us-east-1"
+        # Kiro's subscription service is currently hosted in these two regions.
+        if region.startswith("eu-"):
+            q_region = "eu-central-1"
+        else:
+            q_region = "us-east-1"
+
+        fingerprint = auth_manager.fingerprint
+        suffix = f"KiroIDE-{KIRO_SUBSCRIPTION_VERSION}-{fingerprint}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "content-type": "application/json",
+            "user-agent": (
+                "aws-sdk-js/1.0.0 ua/2.1 os/win32#10.0.19043 "
+                "lang/js md/nodejs#22.22.0 "
+                "api/codewhispererruntime#1.0.0 m/N,E " + suffix
+            ),
+            "x-amz-user-agent": f"aws-sdk-js/1.0.0 {suffix}",
+            "amz-sdk-invocation-id": str(uuid.uuid4()),
+            "amz-sdk-request": "attempt=1; max=1",
+        }
+        body: Dict[str, Any] = {
+            "overageConfiguration": {
+                "overageStatus": "ENABLED" if enabled else "DISABLED"
+            }
+        }
+        if profile_arn:
+            body["profileArn"] = profile_arn
+
+        url = Q_PREFERENCE_URL_TEMPLATE.format(region=q_region)
+        owns_client = http_client is None
+        client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(timeout=30.0))
+        try:
+            try:
+                response = await client.post(url, json=body, headers=headers)
+            except httpx.HTTPError as e:
+                return False, f"Request to Kiro preference endpoint failed: {e}"
+
+            if response.status_code != 200:
+                return False, f"Kiro returned {response.status_code}: {response.text[:300]}"
+
+            # The cached usage response still says the old overage status.
+            self._cache.pop(account_id, None)
+            return True, None
         finally:
             if owns_client:
                 try:

@@ -272,3 +272,63 @@ class TestRemainingCredits:
             {"usageLimit": "many", "currentUsage": "few"}
         ]}
         assert credits_service.remaining_credits(data) is None
+
+
+class TestSetOverage:
+    def _client(self, status_code=200, text=""):
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.text = text
+        client = MagicMock()
+        client.aclose = AsyncMock()
+        client.post = AsyncMock(return_value=resp)
+        return client
+
+    @pytest.mark.asyncio
+    async def test_enable_payload_and_headers(self):
+        am = _make_auth_manager(
+            profile_arn="arn:aws:codewhisperer:us-east-1:111:profile/T1"
+        )
+        client = self._client()
+
+        service = CreditsService(cache_ttl=0)
+        ok, err = await service.set_overage("acct1", am, True, client)
+
+        assert ok is True and err is None
+        url = client.post.call_args.args[0]
+        kwargs = client.post.call_args.kwargs
+        assert url == "https://q.us-east-1.amazonaws.com/setUserPreference"
+        assert kwargs["json"]["overageConfiguration"]["overageStatus"] == "ENABLED"
+        assert kwargs["json"]["profileArn"].endswith("profile/T1")
+        assert kwargs["headers"]["Authorization"] == "Bearer tok123"
+        assert "KiroIDE-0.12.155-" in kwargs["headers"]["user-agent"]
+        assert kwargs["headers"]["amz-sdk-request"] == "attempt=1; max=1"
+
+    @pytest.mark.asyncio
+    async def test_disable_and_eu_region(self):
+        am = _make_auth_manager(
+            profile_arn="arn:aws:codewhisperer:eu-central-1:111:profile/T1"
+        )
+        client = self._client()
+
+        service = CreditsService(cache_ttl=0)
+        ok, err = await service.set_overage("acct1", am, False, client)
+
+        assert ok is True and err is None
+        assert client.post.call_args.args[0] == (
+            "https://q.eu-central-1.amazonaws.com/setUserPreference"
+        )
+        assert client.post.call_args.kwargs["json"]["overageConfiguration"][
+            "overageStatus"
+        ] == "DISABLED"
+
+    @pytest.mark.asyncio
+    async def test_failure_is_returned(self):
+        am = _make_auth_manager()
+        client = self._client(status_code=403, text="denied")
+
+        service = CreditsService(cache_ttl=0)
+        ok, err = await service.set_overage("acct1", am, True, client)
+
+        assert ok is False
+        assert "403" in err

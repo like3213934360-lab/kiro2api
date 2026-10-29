@@ -382,6 +382,40 @@ async def admin_credits(request: Request):
     return {"accounts": results}
 
 
+@router.post("/admin/overage", dependencies=[Depends(require_admin)])
+async def admin_set_overage(request: Request):
+    """Enable/disable paid overage for one account. Body: {accountId, enabled}."""
+    account_manager = getattr(request.app.state, "account_manager", None)
+    if account_manager is None:
+        raise HTTPException(status_code=503, detail="Account system not initialized")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    account_id = body.get("accountId")
+    enabled = body.get("enabled")
+    if not isinstance(account_id, str) or not account_id:
+        raise HTTPException(status_code=400, detail="accountId is required")
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail="enabled must be true or false")
+
+    account = account_manager._accounts.get(account_id)
+    if account is None or account.auth_manager is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    success, error = await credits_service.set_overage(
+        account_id,
+        account.auth_manager,
+        enabled,
+        request.app.state.http_client,
+    )
+    if not success:
+        raise HTTPException(status_code=502, detail=error or "Kiro rejected the request")
+    return {"ok": True, "accountId": account_id, "enabled": enabled}
+
+
 @router.get("/admin/overview", dependencies=[Depends(require_admin)])
 async def admin_overview(request: Request):
     """Summary: accounts with stats, external keys usage, app info."""
