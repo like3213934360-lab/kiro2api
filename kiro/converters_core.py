@@ -73,9 +73,10 @@ EMPTY_CONTENT_PLACEHOLDER = "."
 # actively working with.
 AUTO_CONTEXT_PRUNE_TOKENS = 220_000
 AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS = 8
-AUTO_PRUNE_OLD_TOOL_RESULT_CHARS = 2_000
+AUTO_PRUNE_PREVIEW_CHARS = 300
 AUTO_PRUNE_MARKER = (
-    "\n...[older tool output automatically shortened to keep this session fast]...\n"
+    "\n...[older tool result cleared automatically to keep this session fast; "
+    "re-run the tool if you need it]..."
 )
 
 
@@ -1582,9 +1583,10 @@ def auto_prune_context(payload: Dict[str, Any]) -> int:
 
     This runs automatically; no environment variable or user action is needed.
     It only touches tool results in ``history`` (never the current turn), keeps
-    the most recent results untouched, deduplicates repeated outputs and keeps
-    the head/tail of old ones. Tool-use IDs, statuses and ordering are preserved
-    so the Kiro payload stays valid.
+    the most recent results untouched, deduplicates repeated outputs and clears
+    old ones down to a short preview. Tool-use IDs, statuses and ordering are
+    preserved so the Kiro payload stays valid. The approach mirrors Anthropic's
+    server-side ``clear_tool_uses`` context editing.
 
     Args:
         payload: Kiro payload produced by build_kiro_payload()
@@ -1641,10 +1643,13 @@ def auto_prune_context(payload: Dict[str, Any]) -> int:
                 replacement = "[duplicate tool output omitted automatically]"
             else:
                 seen.add(digest)
-                if len(text) <= AUTO_PRUNE_OLD_TOOL_RESULT_CHARS:
+                if len(text) <= AUTO_PRUNE_PREVIEW_CHARS:
                     continue
-                half = AUTO_PRUNE_OLD_TOOL_RESULT_CHARS // 2
-                replacement = text[:half] + AUTO_PRUNE_MARKER + text[-half:]
+                # Keep a short preview so the model can tell which result this
+                # was, then clear the rest. This mirrors Anthropic's server-side
+                # clear_tool_uses context editing: the full history stays in the
+                # client, the gateway only edits the outbound prompt.
+                replacement = text[:AUTO_PRUNE_PREVIEW_CHARS] + AUTO_PRUNE_MARKER
 
             removed += max(0, len(text) - len(replacement))
             pruned_count += 1
@@ -1653,7 +1658,7 @@ def auto_prune_context(payload: Dict[str, Any]) -> int:
     if pruned_count:
         logger.info(
             f"[AutoPrune] context ~{estimated_tokens} tokens > {AUTO_CONTEXT_PRUNE_TOKENS}; "
-            f"shortened {pruned_count} old tool result(s), freed ~{removed // 4} tokens"
+            f"cleared {pruned_count} old tool result(s), freed ~{removed // 4} tokens"
         )
     return removed
 

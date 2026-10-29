@@ -6844,7 +6844,7 @@ class TestAutoPruneContext:
 
         monkeypatch.setattr(cc, "AUTO_CONTEXT_PRUNE_TOKENS", 1000)
         monkeypatch.setattr(cc, "AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS", 2)
-        monkeypatch.setattr(cc, "AUTO_PRUNE_OLD_TOOL_RESULT_CHARS", 200)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_CHARS", 200)
 
         def result(tool_id, text):
             return {
@@ -6873,7 +6873,7 @@ class TestAutoPruneContext:
             tool_result = entry["userInputMessage"]["userInputMessageContext"]["toolResults"][0]
             text = tool_result["content"][0]["text"]
             if index < 3:
-                assert "automatically shortened" in text
+                assert "cleared automatically" in text
                 assert len(text) < 1000
             else:
                 assert text.endswith("X" * 100)
