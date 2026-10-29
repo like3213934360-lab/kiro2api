@@ -847,16 +847,42 @@ class TestCollectAnthropicResponse:
         
         print("Action: Collecting Anthropic response...")
         
+        from kiro.streaming_core import EmptyKiroResponseError
         with patch('kiro.streaming_anthropic.collect_stream_to_result', return_value=mock_result):
-            result = await collect_anthropic_response(
+            with pytest.raises(EmptyKiroResponseError):
+                await collect_anthropic_response(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                )
+        
+        print("✓ Empty upstream stream raises a retryable error")
+        
+    @pytest.mark.asyncio
+    async def test_empty_stream_emits_error_event(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Verifies an empty upstream stream produces an SSE error event.
+        Purpose: Kiro may close the EventStream without any model output; clients
+                 must see an explicit retryable error, not an empty assistant turn.
+        """
+        print("Setup: Mock stream that yields no events...")
+        
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            return
+            yield  # Make it a generator
+        
+        print("Action: Streaming to Anthropic format...")
+        events = []
+        
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            async for event in stream_kiro_to_anthropic(
                 mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
-            )
+            ):
+                events.append(event)
         
-        print(f"Result: {result}")
-        
-        # Content should be empty list
-        assert result["content"] == []
-        print("✓ Empty content handled correctly")
+        print(f"Received {len(events)} events")
+        assert any("event: error" in event for event in events)
+        assert any("empty stream" in event for event in events)
+        assert not any("event: message_stop" in event for event in events)
+        print("✓ Empty stream surfaced as a retryable error")
 
 
 # ==================================================================================================

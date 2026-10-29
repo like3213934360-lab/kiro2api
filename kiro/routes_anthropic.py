@@ -55,6 +55,7 @@ from kiro.streaming_anthropic import (
     WebSearchContinuation,
     WebSearchContinuationItem,
 )
+from kiro.streaming_core import EmptyKiroResponseError
 from kiro.http_client import KiroHttpClient
 from kiro.utils import conversation_diagnostic_id, resolve_conversation_id, summarize_cache_prefix
 from kiro.tokenizer import estimate_request_tokens
@@ -1010,7 +1011,23 @@ async def messages(
                 debug_logger.discard_buffers()
             
             return JSONResponse(content=anthropic_response)
-    
+
+    except EmptyKiroResponseError as e:
+        await http_client.close()
+        logger.error(f"HTTP 502 - POST /v1/messages - {e}")
+        if debug_logger:
+            debug_logger.flush_on_error(502, str(e))
+        return JSONResponse(
+            status_code=502,
+            content={
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": str(e),
+                },
+            },
+        )
+
     except HTTPException as e:
         await http_client.close()
         

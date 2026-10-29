@@ -118,6 +118,17 @@ class FirstTokenTimeoutError(Exception):
     pass
 
 
+class EmptyKiroResponseError(Exception):
+    """Raised when Kiro ends the stream without producing any model output.
+
+    This is distinct from a content-filter refusal (which carries a reason):
+    the upstream EventStream simply contained no text, thinking or tool call.
+    Surfacing it explicitly lets clients retry instead of silently accepting
+    an empty assistant turn.
+    """
+    pass
+
+
 # ==================================================================================================
 # Kiro Stream Parsing
 # ==================================================================================================

@@ -54,6 +54,7 @@ from loguru import logger
 from kiro.streaming_core import (
     parse_kiro_stream,
     collect_stream_to_result,
+    EmptyKiroResponseError,
     FirstTokenTimeoutError,
     KiroEvent,
     calculate_tokens_from_context_usage,
@@ -845,7 +846,31 @@ async def stream_kiro_to_anthropic(
                             "delta": {"type": "text_delta", "text": summary},
                         })
                     break
-        
+
+        # Kiro occasionally closes the EventStream without any semantic output
+        # (no text, thinking or tool call, and no refusal reason). Returning an
+        # empty assistant turn makes the client silently lose the turn, so emit
+        # a retryable error instead. This mirrors 9router's "EventStream ended
+        # without model output" detection, but keeps the Anthropic error shape.
+        if (
+            not full_content
+            and not full_thinking_content
+            and not tool_blocks
+            and not refusal_text
+        ):
+            logger.error("Kiro EventStream ended without model output")
+            yield format_sse_event("error", {
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": (
+                        "Kiro returned no output (empty stream). "
+                        "Please retry the request."
+                    ),
+                },
+            })
+            return
+
         # Track completion signals for truncation detection
         stream_completed_normally = context_usage_percentage is not None
         
@@ -1146,7 +1171,15 @@ async def collect_anthropic_response(
             "name": tool_name,
             "input": tool_input
         })
-    
+
+    if not content_blocks and not result.refusal:
+        # Same condition as the streaming path: an empty upstream stream.
+        # Raise so the route can return a retryable 502 instead of HTTP 200
+        # with an empty assistant message.
+        raise EmptyKiroResponseError(
+            "Kiro returned no output (empty stream). Please retry the request."
+        )
+
     # Calculate output tokens
     output_tokens = count_tokens(result.content + result.thinking_content)
     
