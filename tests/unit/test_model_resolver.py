@@ -285,6 +285,18 @@ class TestNormalizeModelName:
         print(f"Comparing result: Expected 'claude-opus-4.5', Got '{result}'")
         assert result == "claude-opus-4.5"
     
+    def test_router_thinking_suffix_is_stripped(self):
+        """
+        What it does: claude-opus-5.5-thinking → claude-opus-5.5
+        Purpose: 9router and similar routers expose a "-thinking" model variant;
+                 clients migrating to this gateway keep that model name.
+        """
+        print("Action: Normalizing 'claude-opus-5.5-thinking'...")
+
+        assert normalize_model_name("claude-opus-5.5-thinking") == "claude-opus-5.5"
+        assert normalize_model_name("claude-sonnet-5-thinking") == "claude-sonnet-5"
+        assert normalize_model_name("claude-haiku-5.5-thinking") == "claude-haiku-5.5"
+
     def test_inverted_format_all_families(self):
         """
         What it does: Verifies inverted format works for all families.

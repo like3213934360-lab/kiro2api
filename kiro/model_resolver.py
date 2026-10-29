@@ -210,6 +210,16 @@ def normalize_model_name(name: str) -> str:
         family = match.group(3)  # opus
         return f"claude-{family}-{major}.{minor}"  # claude-opus-4.5
     
+    # Pattern 6: thinking-variant suffix used by routers/clients (e.g. 9router)
+    # Matches: claude-opus-5.5-thinking, claude-sonnet-5-thinking
+    # Convert to: claude-opus-5.5, claude-sonnet-5
+    # The gateway already enables extended thinking by default, so the suffix
+    # only selects the same underlying Kiro model.
+    thinking_suffix_pattern = r'^(claude-(?:haiku|sonnet|opus)-\d+(?:\.\d+)?)-thinking$'
+    match = re.match(thinking_suffix_pattern, name_lower)
+    if match:
+        return match.group(1)
+
     # No transformation needed - return as-is (preserving original case for passthrough)
     return name
 
