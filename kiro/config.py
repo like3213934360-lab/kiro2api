@@ -410,6 +410,19 @@ CONVERSATION_CACHE_AFFINITY: bool = os.getenv("CONVERSATION_CACHE_AFFINITY", "tr
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # ==================================================================================================
+# Billing Attribution Strip
+# ==================================================================================================
+
+# Claude Code 2.1.x prepends a per-request system text block of the form
+# ``x-anthropic-billing-header: cc_version=...; cc_entrypoint=...; cch=<5hex>;``
+# where ``cch`` is a fresh random hex token. The Kiro gateway concatenates all
+# system text blocks before forwarding, so this random prefix would invalidate
+# any upstream prompt cache keyed on the prompt prefix. When enabled (default),
+# the gateway strips the leading attribution line / block before forwarding.
+# Disable only for A/B comparison or to debug attribution behavior.
+STRIP_BILLING_HEADER: bool = os.getenv("STRIP_BILLING_HEADER", "true").lower() in ("true", "1", "yes")
+
+# ==================================================================================================
 # First Token Timeout Settings (Streaming Retry)
 # ==================================================================================================
 
@@ -431,6 +444,15 @@ STREAMING_READ_TIMEOUT: float = float(os.getenv("STREAMING_READ_TIMEOUT", "300")
 # After exhausting all attempts, an error will be returned.
 # Default: 3 attempts
 FIRST_TOKEN_MAX_RETRIES: int = int(os.getenv("FIRST_TOKEN_MAX_RETRIES", "3"))
+
+# Keepalive interval for streaming responses to the client (in seconds).
+# Tool calls are buffered until Kiro finishes the whole response, so a large tool input
+# (e.g. writing a big file) can leave the client without a single byte for minutes.
+# Clients with an idle-stream watchdog (e.g. Claude Code) then abort the request.
+# While the stream is silent for this long, a keepalive is sent: an Anthropic `ping`
+# event or an SSE comment line for OpenAI. Clients ignore both.
+# Default: 10 seconds. Set to 0 to disable.
+STREAM_KEEPALIVE_INTERVAL: float = float(os.getenv("STREAM_KEEPALIVE_INTERVAL", "10"))
 
 # ==================================================================================================
 # Debug Settings

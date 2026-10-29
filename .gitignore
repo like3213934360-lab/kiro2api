@@ -37,3 +37,9 @@ requests/
 .coverage
 htmlcov/
 /codex-debug_logs/
+
+# Local gateway runtime artifacts (may contain tokens/ARNs - never commit)
+gateway.pid
+gateway.log
+gateway.out.log
+gateway.err.log

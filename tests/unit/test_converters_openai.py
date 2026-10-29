@@ -737,7 +737,7 @@ class TestBuildKiroPayload:
     def test_handles_assistant_as_last_message(self):
         """
         What it does: Verifies handling of assistant as last message.
-        Purpose: Ensure "(empty placeholder)" message is created.
+        Purpose: Ensure "." message is created.
         """
         print("Setup: Request with assistant at the end...")
         request = ChatCompletionRequest(
@@ -753,7 +753,7 @@ class TestBuildKiroPayload:
         
         print(f"Result: {result}")
         current_content = result["conversationState"]["currentMessage"]["userInputMessage"]["content"]
-        assert current_content == "(empty placeholder)"
+        assert current_content == "."
     
     def test_raises_for_empty_messages(self):
         """
@@ -775,8 +775,8 @@ class TestBuildKiroPayload:
     
     def test_uses_continue_for_empty_content(self):
         """
-        What it does: Verifies using "(empty placeholder)" for empty content.
-        Purpose: Ensure empty message is replaced with "(empty placeholder)".
+        What it does: Verifies using "." for empty content.
+        Purpose: Ensure empty message is replaced with ".".
         """
         print("Setup: Request with empty content...")
         request = ChatCompletionRequest(
@@ -791,7 +791,7 @@ class TestBuildKiroPayload:
 
         print(f"Result: {result}")
         current_content = result["conversationState"]["currentMessage"]["userInputMessage"]["content"]
-        assert current_content == "(empty placeholder)"
+        assert current_content == "."
     
     def test_normalizes_model_id_correctly(self):
         """
@@ -845,10 +845,13 @@ class TestBuildKiroPayload:
         assert len(context["tools"]) == 1
         assert context["tools"][0]["toolSpecification"]["name"] == "get_weather"
     
-    def test_injects_thinking_tags_even_when_tool_results_present(self):
+    def test_skips_thinking_tags_when_current_message_is_tool_result_only(self):
         """
-        What it does: Verifies thinking tags ARE injected even when toolResults are present.
-        Purpose: Extended thinking should work in all scenarios including tool use flows.
+        What it does: Verifies thinking tags are NOT injected when the current message is a
+                      tool-result-only turn (no user text, only toolResults).
+        Purpose: A tool-result delivery carries no user intent. Injecting thinking tags there
+                 makes the model treat it as an empty user message, so the gateway deliberately
+                 skips injection and the content stays the minimal "." filler.
         """
         print("Setup: Request where last message is a tool result...")
         request = ChatCompletionRequest(
@@ -892,8 +895,8 @@ class TestBuildKiroPayload:
         print(f"Has toolResults: {'toolResults' in context}")
         
         assert "toolResults" in context, "toolResults should be present"
-        assert "<thinking_mode>enabled</thinking_mode>" in content, "thinking tags SHOULD be injected even with toolResults"
-        assert "<max_thinking_length>4000</max_thinking_length>" in content, "max_thinking_length should be present"
+        assert "<thinking_mode>" not in content, "thinking tags should NOT be injected for tool-result-only turns"
+        assert content == ".", "tool-result-only current message uses the minimal '.' filler"
     
     def test_injects_thinking_tags_when_no_tool_results(self):
         """
@@ -1328,6 +1331,199 @@ class TestBuildKiroPayloadToolCallsIntegration:
         assert "tooluse_first" in tool_result_ids
         assert "tooluse_second" in tool_result_ids
     
+    def test_tool_result_followed_by_user_image_preserves_images_in_payload(self):
+        """
+        What it does: Verifies OpenAI tool result followed by user image preserves images in Kiro payload.
+        Purpose: Ensure images in user messages following tool responses are not dropped when merged.
+        """
+        print("Setup: Request with assistant tool call, tool result, and user image...")
+        request = ChatCompletionRequest(
+            model="claude-sonnet-4-5",
+            messages=[
+                ChatMessage(role="user", content="Take a screenshot"),
+                ChatMessage(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[{
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {"name": "take_screenshot", "arguments": "{}"}
+                    }]
+                ),
+                ChatMessage(
+                    role="tool",
+                    tool_call_id="call_123",
+                    content="Screenshot captured"
+                ),
+                ChatMessage(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": "What is shown here?"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="}
+                        }
+                    ]
+                )
+            ],
+            tools=[Tool(
+                type="function",
+                function=ToolFunction(
+                    name="take_screenshot",
+                    description="Takes a screenshot",
+                    parameters={}
+                )
+            )]
+        )
+
+        print("Action: Building Kiro payload...")
+        result = build_kiro_payload(request, "conv-123", "arn:aws:test")
+
+        current_msg = result["conversationState"]["currentMessage"]["userInputMessage"]
+        print(f"Current message keys: {list(current_msg.keys())}")
+
+        # Verify toolResults are present in userInputMessageContext
+        context = current_msg.get("userInputMessageContext", {})
+        tool_results = context.get("toolResults", [])
+        assert len(tool_results) == 1
+        assert tool_results[0]["toolUseId"] == "call_123"
+
+        # Verify images are present in userInputMessage
+        assert "images" in current_msg, "images key missing from userInputMessage"
+        images = current_msg["images"]
+        assert len(images) == 1
+        assert images[0]["format"] == "png"
+        assert images[0]["source"]["bytes"] == "iVBORw0KGgoAAAANSUhEUg=="
+
+    def test_multiple_tool_results_with_multiple_images_preserves_all_in_payload(self):
+        """
+        What it does: Verifies multiple tool results followed by multiple images in user message.
+        Purpose: Ensure all toolResults and all images are preserved with correct counts and formats.
+        """
+        print("Setup: Two tool calls, two tool results, and user message with two images...")
+        request = ChatCompletionRequest(
+            model="claude-sonnet-4-5",
+            messages=[
+                ChatMessage(role="user", content="Compare two tools"),
+                ChatMessage(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "fetch_a", "arguments": "{}"}
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "fetch_b", "arguments": "{}"}
+                        }
+                    ]
+                ),
+                ChatMessage(role="tool", tool_call_id="call_1", content="Result A"),
+                ChatMessage(role="tool", tool_call_id="call_2", content="Result B"),
+                ChatMessage(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": "Compare these two screenshots"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,png_bytes_data"}
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/jpeg;base64,jpeg_bytes_data"}
+                        }
+                    ]
+                )
+            ],
+            tools=[
+                Tool(type="function", function=ToolFunction(name="fetch_a", description="Fetch A", parameters={})),
+                Tool(type="function", function=ToolFunction(name="fetch_b", description="Fetch B", parameters={}))
+            ]
+        )
+
+        print("Action: Building Kiro payload...")
+        result = build_kiro_payload(request, "conv-123", "arn:aws:test")
+
+        current_msg = result["conversationState"]["currentMessage"]["userInputMessage"]
+        context = current_msg.get("userInputMessageContext", {})
+
+        # Verify both tool results are retained
+        tool_results = context.get("toolResults", [])
+        assert len(tool_results) == 2
+        tool_ids = [tr["toolUseId"] for tr in tool_results]
+        assert "call_1" in tool_ids
+        assert "call_2" in tool_ids
+
+        # Verify both images are retained directly in userInputMessage
+        assert "images" in current_msg
+        images = current_msg["images"]
+        assert len(images) == 2
+        assert images[0]["format"] == "png"
+        assert images[0]["source"]["bytes"] == "png_bytes_data"
+        assert images[1]["format"] == "jpeg"
+        assert images[1]["source"]["bytes"] == "jpeg_bytes_data"
+
+    def test_interleaved_tool_messages_with_images_and_user_images(self):
+        """
+        What it does: Verifies tool result containing an image plus a subsequent user message with another image.
+        Purpose: Ensure images from tool messages and adjacent user messages are both preserved together.
+        """
+        print("Setup: Tool message with image plus user message with image...")
+        request = ChatCompletionRequest(
+            model="claude-sonnet-4-5",
+            messages=[
+                ChatMessage(role="user", content="Run visual check"),
+                ChatMessage(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[{
+                        "id": "call_mcp",
+                        "type": "function",
+                        "function": {"name": "mcp_screenshot", "arguments": "{}"}
+                    }]
+                ),
+                ChatMessage(
+                    role="tool",
+                    tool_call_id="call_mcp",
+                    content=[
+                        {"type": "text", "text": "Screenshot taken"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,tool_shot"}}
+                    ]
+                ),
+                ChatMessage(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": "And here is expected design"},
+                        {"type": "image_url", "image_url": {"url": "data:image/webp;base64,design_shot"}}
+                    ]
+                )
+            ],
+            tools=[
+                Tool(type="function", function=ToolFunction(name="mcp_screenshot", description="Screenshot", parameters={}))
+            ]
+        )
+
+        print("Action: Building Kiro payload...")
+        result = build_kiro_payload(request, "conv-123", "arn:aws:test")
+
+        current_msg = result["conversationState"]["currentMessage"]["userInputMessage"]
+        context = current_msg.get("userInputMessageContext", {})
+
+        # Verify tool result present
+        assert len(context.get("toolResults", [])) == 1
+
+        # Verify both images merged: tool image + user message image
+        assert "images" in current_msg
+        images = current_msg["images"]
+        assert len(images) == 2
+        assert images[0]["format"] == "png"
+        assert images[0]["source"]["bytes"] == "tool_shot"
+        assert images[1]["format"] == "webp"
+        assert images[1]["source"]["bytes"] == "design_shot"
+
     def test_long_tool_description_added_to_system_prompt(self):
         """
         What it does: Verifies integration of long tool descriptions into payload.

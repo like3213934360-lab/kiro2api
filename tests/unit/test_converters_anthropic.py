@@ -39,6 +39,10 @@ from kiro.models_anthropic import (
 )
 
 
+# Tiny one-page PDF containing "Resume Alpha" for document block tests
+TEST_PDF_BASE64 = "JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCAzMDAgMTQ0XSAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSA0IDAgUiA+PiA+PiAvQ29udGVudHMgNSAwIFIgPj4KZW5kb2JqCjQgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhID4+CmVuZG9iago1IDAgb2JqCjw8IC9MZW5ndGggNDMgPj4Kc3RyZWFtCkJUIC9GMSAxMiBUZiA3MiA3MiBUZCAoUmVzdW1lIEFscGhhKSBUaiBFVAplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA2CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDU4IDAwMDAwIG4gCjAwMDAwMDAxMTUgMDAwMDAgbiAKMDAwMDAwMDI0MSAwMDAwMCBuIAowMDAwMDAwMzExIDAwMDAwIG4gCnRyYWlsZXIKPDwgL1NpemUgNiAvUm9vdCAxIDAgUiA+PgpzdGFydHhyZWYKNDAzCiUlRU9GCg=="
+
+
 # ==================================================================================================
 # Tests for convert_anthropic_content_to_text
 # ==================================================================================================
@@ -1065,6 +1069,98 @@ class TestConvertAnthropicMessages:
         assert len(result[0].tool_results) == 1
         assert result[0].tool_results[0]["tool_use_id"] == "call_123"
 
+    def test_converts_claude_code_pdf_tool_result_to_text(self):
+        """
+        What it does: Verifies Claude Code PDF tool results expose document text.
+        Purpose: Prevent 422s and avoid forwarding raw base64 to Kiro.
+        """
+        print("Setup: User message with tool_result and PDF document block...")
+        messages = [
+            AnthropicMessage(
+                role="user",
+                content=[
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tooluse_pdf",
+                        "content": "PDF file read: /tmp/resume.pdf",
+                    },
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": TEST_PDF_BASE64,
+                        },
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                ],
+            )
+        ]
+
+        print("Action: Converting messages...")
+        result = convert_anthropic_messages(messages)
+
+        print(f"Result: {result}")
+        assert len(result) == 1
+        assert result[0].tool_results is not None
+        assert result[0].tool_results[0]["content"] == "PDF file read: /tmp/resume.pdf"
+        assert "Resume Alpha" in result[0].content
+        assert TEST_PDF_BASE64 not in result[0].content
+
+    def test_preserves_server_search_result_with_mixed_client_tool_history(self):
+        """Server search results join the following user tool results for Kiro history."""
+        messages = [
+            AnthropicMessage.model_validate({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "server_tool_use",
+                        "id": "srvtoolu_search",
+                        "name": "web_search",
+                        "input": {"query": "synthetic query"},
+                    },
+                    {
+                        "type": "web_search_tool_result",
+                        "tool_use_id": "srvtoolu_search",
+                        "content": [{
+                            "type": "web_search_result",
+                            "title": "Synthetic result",
+                            "url": "https://example.com/result",
+                            "encrypted_content": "Synthetic result text.",
+                            "page_age": None,
+                        }],
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_client",
+                        "name": "read_file",
+                        "input": {"path": "example.txt"},
+                    },
+                ],
+            }),
+            AnthropicMessage.model_validate({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_client",
+                    "content": "Synthetic file content.",
+                }],
+            }),
+        ]
+
+        result = convert_anthropic_messages(messages)
+
+        assert [call["function"]["name"] for call in result[0].tool_calls] == [
+            "web_search",
+            "read_file",
+        ]
+        assert [item["tool_use_id"] for item in result[1].tool_results] == [
+            "srvtoolu_search",
+            "toolu_client",
+        ]
+        assert "synthetic query" in result[1].tool_results[0]["content"]
+        assert "Synthetic result text." in result[1].tool_results[0]["content"]
+
     def test_converts_full_conversation(self):
         """
         What it does: Verifies conversion of full conversation.
@@ -1584,6 +1680,67 @@ class TestAnthropicToKiro:
         print(f"Current content: {current_content}")
         assert "You are a helpful assistant." in current_content
 
+    def test_inline_system_role_message_is_normalized(self):
+        """
+        What it does: Verifies a request with an inline system-role message
+        converts end-to-end without errors and the message is normalized.
+        Purpose: End-to-end coverage for Issue #190 / #226 - newer Claude Code
+        clients inline role="system" hook context in the messages array.
+        The pipeline (normalize_message_roles) must coerce it to "user" so the
+        Kiro API only ever sees user/assistant history entries.
+        """
+        print("Setup: Request with inline system-role message...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4-5",
+            max_tokens=1024,
+            messages=[
+                AnthropicMessage(role="user", content="Hello!"),
+                AnthropicMessage(role="assistant", content="Hi!"),
+                AnthropicMessage(role="system", content="Injected hook context"),
+                AnthropicMessage(role="user", content="Continue please"),
+            ],
+        )
+
+        print("Action: Converting to Kiro payload...")
+        with patch(
+            "kiro.converters_anthropic.get_model_id_for_kiro",
+            return_value="claude-sonnet-4.5",
+        ):
+            with patch("kiro.converters_core.FAKE_REASONING_ENABLED", False):
+                result = anthropic_to_kiro(request, "conv-123", "arn:aws:test")
+
+        print(f"Result: {result}")
+        history = result["conversationState"].get("history", [])
+
+        print("Checking history only contains user/assistant entries...")
+        for entry in history:
+            assert (
+                "userInputMessage" in entry or "assistantResponseMessage" in entry
+            ), f"Unexpected history entry keys: {list(entry.keys())}"
+
+        print("Checking system-role content survived...")
+        # normalize_message_roles() coerces the system role to user, and
+        # merge_adjacent_messages() may then fold that message into a neighbouring
+        # user turn (history or the current message). Only the content matters -
+        # the role itself must never leak through to Kiro.
+        current_content = (
+            result["conversationState"]
+            .get("currentMessage", {})
+            .get("userInputMessage", {})
+            .get("content", "")
+        )
+        user_contents = [
+            entry["userInputMessage"]["content"]
+            for entry in history
+            if "userInputMessage" in entry
+        ] + [current_content]
+        assert any(
+            "Injected hook context" in content for content in user_contents
+        ), "System-role message content was lost during normalization"
+
+        print("Checking no system role leaked into the Kiro payload...")
+        assert "systemInputMessage" not in result["conversationState"]
+
     def test_includes_tools(self):
         """
         What it does: Verifies that tools are included in payload.
@@ -1721,6 +1878,164 @@ class TestAnthropicToKiro:
         tool_results = context.get("toolResults", [])
         print(f"Tool results: {tool_results}")
         assert len(tool_results) == 1
+
+    def test_consecutive_user_messages_with_tool_result_and_image(self):
+        """
+        What it does: Verifies Anthropic request with consecutive user messages (tool result then image).
+        Purpose: Ensure toolResults and images are both preserved when consecutive user messages are merged.
+        """
+        print("Setup: Anthropic request with tool result followed by user message with image...")
+        test_image_base64 = "anthropic_test_image_bytes"
+        request = AnthropicMessagesRequest(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=1000,
+            messages=[
+                AnthropicMessage(role="user", content="Take screenshot"),
+                AnthropicMessage(
+                    role="assistant",
+                    content=[
+                        ToolUseContentBlock(
+                            type="tool_use",
+                            id="call_snap",
+                            name="screenshot_tool",
+                            input={}
+                        )
+                    ]
+                ),
+                AnthropicMessage(
+                    role="user",
+                    content=[
+                        ToolResultContentBlock(
+                            type="tool_result",
+                            tool_use_id="call_snap",
+                            content="Screenshot taken"
+                        )
+                    ]
+                ),
+                AnthropicMessage(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": "Analyze this screenshot"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": test_image_base64
+                            }
+                        }
+                    ]
+                )
+            ],
+            tools=[
+                AnthropicTool(
+                    name="screenshot_tool",
+                    description="Take a screenshot",
+                    input_schema={"type": "object", "properties": {}}
+                )
+            ]
+        )
+
+        print("Action: Converting to Kiro payload...")
+        with patch("kiro.converters_anthropic.get_model_id_for_kiro", return_value="claude-sonnet-4.5"):
+            with patch("kiro.converters_core.FAKE_REASONING_ENABLED", False):
+                result = anthropic_to_kiro(request, "conv-123", "arn:aws:test")
+
+        current_msg = result["conversationState"]["currentMessage"]["userInputMessage"]
+        context = current_msg.get("userInputMessageContext", {})
+
+        # Verify toolResults retained
+        tool_results = context.get("toolResults", [])
+        assert len(tool_results) == 1
+        assert tool_results[0]["toolUseId"] == "call_snap"
+
+        # Verify images retained directly in userInputMessage
+        assert "images" in current_msg
+        assert len(current_msg["images"]) == 1
+        assert current_msg["images"][0]["format"] == "png"
+        assert current_msg["images"][0]["source"]["bytes"] == test_image_base64
+
+    def test_builds_mixed_server_search_and_client_tool_history(self):
+        """Kiro receives both the completed server search and client tool result."""
+        request = AnthropicMessagesRequest.model_validate({
+            "model": "claude-sonnet-5",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Complete a synthetic task."},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "server_tool_use",
+                            "id": "srvtoolu_search",
+                            "name": "web_search",
+                            "input": {"query": "synthetic query"},
+                        },
+                        {
+                            "type": "web_search_tool_result",
+                            "tool_use_id": "srvtoolu_search",
+                            "content": [{
+                                "type": "web_search_result",
+                                "title": "Synthetic result",
+                                "url": "https://example.com/result",
+                                "encrypted_content": "Synthetic result text.",
+                                "page_age": None,
+                            }],
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_client",
+                            "name": "read_file",
+                            "input": {"path": "example.txt"},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_client",
+                        "content": "Synthetic file content.",
+                    }],
+                },
+            ],
+            "tools": [
+                {
+                    "name": "web_search",
+                    "description": "Search the web.",
+                    "input_schema": {"type": "object", "properties": {}},
+                },
+                {
+                    "name": "read_file",
+                    "description": "Read a file.",
+                    "input_schema": {"type": "object", "properties": {}},
+                },
+            ],
+        })
+
+        with (
+            patch(
+                "kiro.converters_anthropic.get_model_id_for_kiro",
+                return_value="claude-sonnet-5",
+            ),
+            patch("kiro.converters_core.FAKE_REASONING_ENABLED", False),
+        ):
+            result = anthropic_to_kiro(request, "conv-123", "arn:aws:test")
+
+        assistant = result["conversationState"]["history"][1][
+            "assistantResponseMessage"
+        ]
+        current_user = result["conversationState"]["currentMessage"][
+            "userInputMessage"
+        ]
+        assert [item["name"] for item in assistant["toolUses"]] == [
+            "web_search",
+            "read_file",
+        ]
+        assert [
+            item["toolUseId"]
+            for item in current_user["userInputMessageContext"]["toolResults"]
+        ] == ["srvtoolu_search", "toolu_client"]
 
     def test_raises_for_empty_messages(self):
         """

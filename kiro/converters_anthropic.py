@@ -24,12 +24,16 @@ This module is an adapter layer that converts Anthropic-specific formats
 to the unified format used by converters_core.py.
 """
 
+import base64
+import re
+from io import BytesIO
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from kiro.config import HIDDEN_MODELS
+from kiro.config import HIDDEN_MODELS, STRIP_BILLING_HEADER
 from kiro.model_resolver import get_model_id_for_kiro
+from kiro.mcp_tools import generate_search_summary
 from kiro.models_anthropic import (
     AnthropicMessagesRequest,
     AnthropicMessage,
@@ -43,6 +47,114 @@ from kiro.converters_core import (
     extract_text_content,
     extract_images_from_content,
 )
+
+try:
+    from pypdf import PdfReader
+except ImportError:  # pragma: no cover - exercised only when optional dependency is absent
+    PdfReader = None
+
+
+MAX_EXTRACTED_DOCUMENT_CHARS = 60000
+
+
+def _block_value(block: Any, key: str, default: Any = None) -> Any:
+    if isinstance(block, dict):
+        return block.get(key, default)
+    return getattr(block, key, default)
+
+
+def _truncate_document_text(text: str) -> str:
+    if len(text) <= MAX_EXTRACTED_DOCUMENT_CHARS:
+        return text
+    return text[:MAX_EXTRACTED_DOCUMENT_CHARS] + "\n\n[Document text truncated]"
+
+
+def _extract_pdf_text_from_base64(data: str) -> str:
+    if PdfReader is None:
+        return "[PDF text extraction unavailable: pypdf is not installed]"
+
+    pdf_bytes = base64.b64decode(data)
+    reader = PdfReader(BytesIO(pdf_bytes))
+    page_texts = []
+
+    for index, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        text = text.strip()
+        if text:
+            page_texts.append(f"Page {index}:\n{text}")
+
+    if not page_texts:
+        return "[PDF text extraction returned no text]"
+
+    return _truncate_document_text("\n\n".join(page_texts))
+
+
+def _document_block_to_text(block: Any) -> str:
+    source = _block_value(block, "source", {})
+    title = _block_value(block, "title", None)
+
+    if isinstance(source, dict):
+        source_type = source.get("type")
+        media_type = source.get("media_type", "application/octet-stream")
+        data = source.get("data", "")
+        url = source.get("url", "")
+    else:
+        source_type = getattr(source, "type", None)
+        media_type = getattr(source, "media_type", "application/octet-stream")
+        data = getattr(source, "data", "")
+        url = getattr(source, "url", "")
+
+    label = f"Document: {title or media_type}"
+
+    if source_type == "base64" and data:
+        try:
+            if media_type == "application/pdf":
+                body = _extract_pdf_text_from_base64(data)
+            elif media_type.startswith("text/"):
+                body = base64.b64decode(data).decode("utf-8", errors="replace")
+                body = _truncate_document_text(body)
+            else:
+                byte_count = len(base64.b64decode(data, validate=True))
+                body = f"[Document extraction unsupported for {media_type}; {byte_count} bytes]"
+        except Exception as exc:
+            logger.warning(f"Failed to extract Anthropic document block ({media_type}): {exc}")
+            body = f"[Document extraction failed for {media_type}: {exc}]"
+
+        return f"[{label}]\n{body}"
+
+    if source_type == "url" and url:
+        return f"[{label}]\n[URL document sources are not supported by Kiro Gateway: {url}]"
+
+    return f"[{label}]\n[Document source was empty or unsupported]"
+
+
+def extract_documents_from_anthropic_content(content: Any) -> str:
+    """
+    Extracts document blocks from Anthropic content as plain text.
+
+    Kiro does not accept Anthropic document blocks directly, so PDF/text
+    documents are converted into text and appended to the user message.
+    """
+    if not isinstance(content, list):
+        return ""
+
+    document_parts = []
+
+    for block in content:
+        block_type = _block_value(block, "type")
+
+        if block_type == "document":
+            document_parts.append(_document_block_to_text(block))
+            continue
+
+        if block_type == "tool_result":
+            result_content = _block_value(block, "content", None)
+            if isinstance(result_content, list):
+                for item in result_content:
+                    if _block_value(item, "type") == "document":
+                        document_parts.append(_document_block_to_text(item))
+
+    return "\n\n".join(document_parts)
 
 
 def convert_anthropic_content_to_text(content: Any) -> str:
@@ -75,6 +187,32 @@ def convert_anthropic_content_to_text(content: Any) -> str:
     return str(content) if content else ""
 
 
+_BILLING_HEADER_LINE_PATTERN = re.compile(
+    r"^x-anthropic-billing-header:[^\n]*\n?", re.IGNORECASE
+)
+
+
+def _strip_billing_attribution(text: str) -> str:
+    """
+    Remove Claude Code's per-request billing attribution string.
+
+    Claude Code (2.1.x) prepends a line like
+    ``x-anthropic-billing-header: cc_version=...; cc_entrypoint=...; cch=<5hex>;``
+    to the system prompt content. The ``cch`` segment is a fresh random hex per
+    request, which defeats any prompt cache keyed on the prompt prefix on
+    upstreams that do not understand the attribution header.
+
+    The line carries no semantic content for the model and is safe to remove
+    before forwarding to Kiro.
+    """
+    if not text or not STRIP_BILLING_HEADER:
+        return text
+    stripped = _BILLING_HEADER_LINE_PATTERN.sub("", text, count=1)
+    if stripped != text:
+        return stripped.lstrip("\n")
+    return text
+
+
 def extract_system_prompt(system: Any) -> str:
     """
     Extracts system prompt text from Anthropic system field.
@@ -86,6 +224,12 @@ def extract_system_prompt(system: Any) -> str:
     The second format is used for prompt caching with cache_control.
     We extract only the text, ignoring cache_control (not supported by Kiro).
 
+    Claude Code injects a per-request billing attribution block as the first
+    system text block (``x-anthropic-billing-header: ...; cch=<5hex>;``). The
+    random ``cch`` segment changes on every request and would invalidate any
+    upstream prompt cache keyed on the prompt prefix, so we drop attribution
+    blocks (and any attribution prefix on string-form prompts) here.
+
     Args:
         system: System prompt in string or list format
 
@@ -96,18 +240,25 @@ def extract_system_prompt(system: Any) -> str:
         return ""
 
     if isinstance(system, str):
-        return system
+        return _strip_billing_attribution(system)
 
     if isinstance(system, list):
         text_parts = []
         for block in system:
+            text: Optional[str] = None
             if isinstance(block, dict):
-                # Handle {"type": "text", "text": "...", "cache_control": {...}}
                 if block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
+                    text = block.get("text", "")
             elif hasattr(block, "type") and block.type == "text":
-                # Handle Pydantic model
-                text_parts.append(getattr(block, "text", ""))
+                text = getattr(block, "text", "")
+            if text is None:
+                continue
+            # Drop pure-attribution blocks; strip leading attribution line
+            # from mixed blocks (defensive).
+            stripped = _strip_billing_attribution(text)
+            if not stripped.strip():
+                continue
+            text_parts.append(stripped)
         return "\n".join(text_parts)
 
     return str(system)
@@ -158,6 +309,84 @@ def extract_tool_results_from_anthropic_content(content: Any) -> List[Dict[str, 
                     "content": result_content or "(empty result)",
                 }
             )
+
+    return tool_results
+
+
+def extract_server_web_search_results_from_anthropic_content(
+    content: Any,
+) -> List[Dict[str, Any]]:
+    """Convert Anthropic server WebSearch result blocks to unified tool results."""
+    if not isinstance(content, list):
+        return []
+
+    search_queries: Dict[str, str] = {}
+    for block in content:
+        if isinstance(block, dict):
+            block_type = block.get("type")
+            tool_id = block.get("id")
+            tool_name = block.get("name")
+            tool_input = block.get("input", {})
+        else:
+            block_type = getattr(block, "type", None)
+            tool_id = getattr(block, "id", None)
+            tool_name = getattr(block, "name", None)
+            tool_input = getattr(block, "input", {})
+
+        if (
+            block_type == "server_tool_use"
+            and tool_name == "web_search"
+            and tool_id
+        ):
+            search_queries[tool_id] = (
+                tool_input.get("query", "") if isinstance(tool_input, dict) else ""
+            )
+
+    tool_results = []
+    for block in content:
+        if isinstance(block, dict):
+            block_type = block.get("type")
+            tool_use_id = block.get("tool_use_id")
+            result_content = block.get("content")
+        else:
+            block_type = getattr(block, "type", None)
+            tool_use_id = getattr(block, "tool_use_id", None)
+            result_content = getattr(block, "content", None)
+
+        if block_type != "web_search_tool_result" or not tool_use_id:
+            continue
+
+        if isinstance(result_content, list):
+            search_results = []
+            for item in result_content:
+                if isinstance(item, dict):
+                    search_results.append({
+                        "title": item.get("title", ""),
+                        "url": item.get("url", ""),
+                        "snippet": item.get("encrypted_content", ""),
+                    })
+                else:
+                    search_results.append({
+                        "title": getattr(item, "title", ""),
+                        "url": getattr(item, "url", ""),
+                        "snippet": getattr(item, "encrypted_content", ""),
+                    })
+            result_text = generate_search_summary(
+                search_queries.get(tool_use_id, ""),
+                {"results": search_results},
+            )
+        else:
+            if isinstance(result_content, dict):
+                error_code = result_content.get("error_code", "unknown")
+            else:
+                error_code = getattr(result_content, "error_code", "unknown")
+            result_text = f"Web search failed: {error_code}"
+
+        tool_results.append({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": result_text,
+        })
 
     return tool_results
 
@@ -238,7 +467,11 @@ def extract_tool_uses_from_anthropic_content(content: Any) -> List[Dict[str, Any
             tool_name = getattr(block, "name", None)
             tool_input = getattr(block, "input", {})
 
-        if block_type == "tool_use" and tool_id and tool_name:
+        if (
+            block_type in {"tool_use", "server_tool_use"}
+            and tool_id
+            and tool_name
+        ):
             tool_calls.append(
                 {
                     "id": tool_id,
@@ -277,6 +510,7 @@ def convert_anthropic_messages(
     total_tool_calls = 0
     total_tool_results = 0
     total_images = 0
+    pending_server_tool_results: List[Dict[str, Any]] = []
 
     for msg in messages:
         # The Anthropic message schema has no system role, yet clients such as
@@ -290,6 +524,9 @@ def convert_anthropic_messages(
 
         # Extract text content
         text_content = convert_anthropic_content_to_text(content)
+        document_text = extract_documents_from_anthropic_content(content)
+        if document_text:
+            text_content = f"{text_content}\n\n{document_text}".strip()
 
         # Extract tool-related data and images based on role
         tool_calls = None
@@ -301,10 +538,18 @@ def convert_anthropic_messages(
             tool_calls = extract_tool_uses_from_anthropic_content(content)
             if tool_calls:
                 total_tool_calls += len(tool_calls)
+            server_tool_results = (
+                extract_server_web_search_results_from_anthropic_content(content)
+            )
+            if server_tool_results:
+                pending_server_tool_results.extend(server_tool_results)
 
         elif role == "user":
             # User messages may contain tool_result blocks and images
             tool_results = extract_tool_results_from_anthropic_content(content)
+            if pending_server_tool_results:
+                tool_results = pending_server_tool_results + tool_results
+                pending_server_tool_results = []
             if tool_results:
                 total_tool_results += len(tool_results)
 
@@ -331,6 +576,14 @@ def convert_anthropic_messages(
             images=images if images else None,
         )
         unified_messages.append(unified_msg)
+
+    if pending_server_tool_results:
+        unified_messages.append(UnifiedMessage(
+            role="user",
+            content="",
+            tool_results=pending_server_tool_results,
+        ))
+        total_tool_results += len(pending_server_tool_results)
 
     # Log summary if any tool content or images were found
     if total_tool_calls > 0 or total_tool_results > 0 or total_images > 0:

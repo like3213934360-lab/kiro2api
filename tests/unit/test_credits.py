@@ -129,7 +129,8 @@ class TestQuery:
         assert headers["Authorization"] == "Bearer tok123"
         assert headers["X-Kiro-Idp"] == "AWSIdC"
         assert headers["X-Kiro-Profile-Arn"] == am.profile_arn
-        assert headers["User-Agent"].startswith("KiroIDE-1.1.14-")
+        from kiro.config import KIRO_IDE_VERSION
+        assert headers["User-Agent"].startswith(f"KiroIDE-{KIRO_IDE_VERSION}-")
 
     @pytest.mark.asyncio
     async def test_non_200_returns_error(self):

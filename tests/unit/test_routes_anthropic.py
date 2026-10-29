@@ -346,26 +346,62 @@ class TestMessagesValidation:
         print(f"Status: {response.status_code}")
         assert response.status_code == 422
     
-    def test_validates_invalid_role(self, test_client, valid_proxy_api_key):
+    def test_accepts_non_standard_role(self, test_client, valid_proxy_api_key):
         """
-        What it does: Verifies invalid message role is rejected.
-        Purpose: Anthropic model strictly validates role (only 'user' or 'assistant').
+        What it does: Verifies non-standard message roles pass validation.
+        Purpose: Fix for Issue #190 / #226 - unknown roles must NOT be
+        rejected with 422; normalize_message_roles() in converters_core.py
+        coerces them to 'user' downstream, matching the OpenAI path where
+        role is already str.
+
+        Note: This inverts the previous behavior (strict Literal validation),
+        which rejected requests before the gateway's own normalization logic
+        could run.
         """
-        print("Action: POST /v1/messages with invalid role...")
+        print("Action: POST /v1/messages with non-standard role...")
         response = test_client.post(
             "/v1/messages",
             headers={"x-api-key": valid_proxy_api_key},
             json={
                 "model": "claude-sonnet-4-5",
                 "max_tokens": 1024,
-                "messages": [{"role": "invalid_role", "content": "Hello"}]
+                "messages": [{"role": "developer", "content": "Hello"}]
             }
         )
-        
+
         print(f"Status: {response.status_code}")
-        # Anthropic model strictly validates role - only 'user' or 'assistant' allowed
-        assert response.status_code == 422
-    
+        # Should pass validation (not 422) - normalized to 'user' downstream
+        assert response.status_code != 422
+
+    def test_accepts_inline_system_role_message(self, test_client, valid_proxy_api_key):
+        """
+        What it does: Verifies inline system-role messages pass validation.
+        Purpose: This is the PRIMARY route-level test for Issue #190 / #226.
+        Newer Claude Code clients inline role="system" hook context in the
+        messages array; before the fix this returned:
+        422 "Input should be 'user' or 'assistant'".
+        """
+        print("Action: POST /v1/messages with inline system-role message...")
+        response = test_client.post(
+            "/v1/messages",
+            headers={"x-api-key": valid_proxy_api_key},
+            json={
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 1024,
+                "system": "You are a helpful assistant.",
+                "messages": [
+                    {"role": "user", "content": "Hello"},
+                    {"role": "assistant", "content": "Hi!"},
+                    {"role": "system", "content": "Injected hook context"},
+                    {"role": "user", "content": "Continue please"}
+                ]
+            }
+        )
+
+        print(f"Status: {response.status_code}")
+        # Should pass validation (not 422)
+        assert response.status_code != 422
+
     def test_accepts_valid_request_format(self, test_client, valid_proxy_api_key):
         """
         What it does: Verifies valid request format passes validation.
@@ -463,6 +499,58 @@ class TestMessagesSystemPrompt:
 
 class TestMessagesContentBlocks:
     """Tests for content block handling on /v1/messages endpoint."""
+
+    def test_accepts_web_search_history_from_claude_code(
+        self, test_client, valid_proxy_api_key
+    ):
+        """
+        What it does: Replays a completed server-side web search in conversation history.
+        Purpose: Prevent the request after a successful search from failing with HTTP 422.
+        """
+        print("Action: POST /v1/messages with synthetic web search history...")
+        response = test_client.post(
+            "/v1/messages",
+            headers={"x-api-key": valid_proxy_api_key},
+            json={
+                "model": "claude-sonnet-5",
+                "max_tokens": 1024,
+                "messages": [
+                    {"role": "user", "content": "search for an example"},
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "server_tool_use",
+                                "id": "srvtoolu_test",
+                                "name": "web_search",
+                                "input": {"query": "example query"},
+                            },
+                            {
+                                "type": "web_search_tool_result",
+                                "tool_use_id": "srvtoolu_test",
+                                "content": [
+                                    {
+                                        "type": "web_search_result",
+                                        "title": "Example",
+                                        "url": "https://example.com",
+                                        "encrypted_content": "Synthetic result text",
+                                        "page_age": None,
+                                    }
+                                ],
+                            },
+                            {
+                                "type": "text",
+                                "text": "<web_search>Synthetic search summary</web_search>",
+                            },
+                        ],
+                    },
+                    {"role": "user", "content": "continue"},
+                ],
+            },
+        )
+
+        print(f"Status: {response.status_code}")
+        assert response.status_code == 200
     
     def test_accepts_string_content(self, test_client, valid_proxy_api_key):
         """
@@ -1609,6 +1697,102 @@ class TestContentTruncationRecovery:
 # ==================================================================================================
 # Tests for WebSearch Support
 # ==================================================================================================
+
+class TestWebSearchContinuationRequest:
+    """Tests for the internal model request after a server-side web search."""
+
+    @pytest.mark.asyncio
+    async def test_builds_tool_history_and_removes_web_search_at_round_limit(self):
+        """Search results are fed back with the original tool ID and client tools remain."""
+        from kiro.models_anthropic import AnthropicMessagesRequest
+        from kiro.routes_anthropic import _create_web_search_continuation
+
+        request_data = AnthropicMessagesRequest.model_validate({
+            "model": "claude-sonnet-5",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Find a synthetic example."}],
+            "tools": [
+                {
+                    "name": "web_search",
+                    "description": "Search the web.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                    },
+                },
+                {
+                    "name": "read_file",
+                    "description": "Read a local file.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                    },
+                },
+            ],
+        })
+        response = Mock(status_code=200)
+        http_client = Mock()
+        http_client.request_with_retry = AsyncMock(return_value=response)
+
+        with patch(
+            "kiro.routes_anthropic.anthropic_to_kiro",
+            return_value={"synthetic": "payload"},
+        ) as converter:
+            continuation = _create_web_search_continuation(
+                request_data=request_data,
+                http_client=http_client,
+                url="https://example.invalid/generateAssistantResponse",
+                conversation_id="conv_synthetic",
+                profile_arn="synthetic-profile",
+            )
+            actual = await continuation(
+                "Searching now.",
+                [{
+                    "tool_use_id": "toolu_synthetic_search",
+                    "query": "synthetic query",
+                    "results": {
+                        "results": [{
+                            "title": "Synthetic result",
+                            "url": "https://example.com/result",
+                            "snippet": "Synthetic result text.",
+                        }],
+                    },
+                }],
+                False,
+            )
+
+        assert actual is response
+        continuation_request = converter.call_args.args[0]
+        assistant_message = continuation_request.messages[-2]
+        result_message = continuation_request.messages[-1]
+
+        assert assistant_message.role == "assistant"
+        assert assistant_message.content[0].type == "text"
+        assert assistant_message.content[0].text == "Searching now."
+        assert assistant_message.content[1].type == "tool_use"
+        assert assistant_message.content[1].id == "toolu_synthetic_search"
+        assert assistant_message.content[1].name == "web_search"
+        assert assistant_message.content[1].input == {"query": "synthetic query"}
+
+        assert result_message.role == "user"
+        assert result_message.content[0].type == "tool_result"
+        assert result_message.content[0].tool_use_id == "toolu_synthetic_search"
+        assert "Synthetic result" in result_message.content[0].content
+        assert "https://example.com/result" in result_message.content[0].content
+
+        assert [tool.name for tool in continuation_request.tools] == ["read_file"]
+        converter.assert_called_once_with(
+            continuation_request,
+            "conv_synthetic",
+            "synthetic-profile",
+        )
+        http_client.request_with_retry.assert_awaited_once_with(
+            "POST",
+            "https://example.invalid/generateAssistantResponse",
+            {"synthetic": "payload"},
+            stream=True,
+        )
+
 
 class TestWebSearchAutoInjection:
     """Tests for WebSearch auto-injection (Path B - MCP Tool Emulation)."""

@@ -66,6 +66,9 @@ from kiro.models_anthropic import (
 # Base64 1x1 pixel JPEG for testing
 TEST_IMAGE_BASE64 = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q=="
 
+# Tiny one-page PDF containing "Resume Alpha" for document block tests
+TEST_PDF_BASE64 = "JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCAzMDAgMTQ0XSAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSA0IDAgUiA+PiA+PiAvQ29udGVudHMgNSAwIFIgPj4KZW5kb2JqCjQgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhID4+CmVuZG9iago1IDAgb2JqCjw8IC9MZW5ndGggNDMgPj4Kc3RyZWFtCkJUIC9GMSAxMiBUZiA3MiA3MiBUZCAoUmVzdW1lIEFscGhhKSBUaiBFVAplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA2CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDU4IDAwMDAwIG4gCjAwMDAwMDAxMTUgMDAwMDAgbiAKMDAwMDAwMDI0MSAwMDAwMCBuIAowMDAwMDAwMzExIDAwMDAwIG4gCnRyYWlsZXIKPDwgL1NpemUgNiAvUm9vdCAxIDAgUiA+PgpzdGFydHhyZWYKNDAzCiUlRU9GCg=="
+
 
 # ==================================================================================================
 # Tests for Base64ImageSource
@@ -390,6 +393,37 @@ class TestContentBlockUnion:
         print(f"Comparing type: Expected 'tool_result', Got '{block.type}'")
         assert block.type == "tool_result"
 
+    def test_message_accepts_document_content_block(self):
+        """
+        What it does: Verifies AnthropicMessage accepts document blocks.
+        Purpose: Claude Code sends PDFs as document blocks after reading files.
+        """
+        print("Setup: Creating AnthropicMessage with PDF document content...")
+        message = AnthropicMessage(
+            role="user",
+            content=[
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tooluse_pdf",
+                    "content": "PDF file read: /tmp/resume.pdf",
+                },
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": TEST_PDF_BASE64,
+                    },
+                    "cache_control": {"type": "ephemeral"},
+                },
+            ],
+        )
+
+        print(f"Result: {message}")
+        assert message.role == "user"
+        assert len(message.content) == 2
+        assert message.content[1].type == "document"
+
 
 # ==================================================================================================
 # Tests for AnthropicMessage with Image Content (Issue #30 fix verification)
@@ -531,6 +565,95 @@ class TestAnthropicMessageWithImages:
 # Tests for AnthropicMessagesRequest with Image Content
 # ==================================================================================================
 
+class TestWebSearchHistoryContentBlocks:
+    """Tests for Anthropic server-side web search blocks replayed in history."""
+
+    def test_accepts_completed_web_search_history(self):
+        """
+        What it does: Validates a completed server-side web search assistant turn.
+        Purpose: Allow Claude Code to send gateway search output back on the next request.
+        """
+        print("Action: Validating synthetic web search history...")
+        request = AnthropicMessagesRequest.model_validate({
+            "model": "claude-sonnet-5",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "search for an example"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "server_tool_use",
+                            "id": "srvtoolu_test",
+                            "name": "web_search",
+                            "input": {"query": "example query"},
+                        },
+                        {
+                            "type": "web_search_tool_result",
+                            "tool_use_id": "srvtoolu_test",
+                            "content": [
+                                {
+                                    "type": "web_search_result",
+                                    "title": "Example",
+                                    "url": "https://example.com",
+                                    "encrypted_content": "Synthetic result text",
+                                    "page_age": None,
+                                }
+                            ],
+                        },
+                        {"type": "text", "text": "Synthetic search summary"},
+                    ],
+                },
+                {"role": "user", "content": "continue"},
+            ],
+        })
+
+        search_call, search_result, summary = request.messages[1].content
+        print("Verifying typed blocks preserve server search metadata...")
+        assert search_call.type == "server_tool_use"
+        assert search_call.id == "srvtoolu_test"
+        assert search_call.input == {"query": "example query"}
+        assert search_result.type == "web_search_tool_result"
+        assert search_result.tool_use_id == "srvtoolu_test"
+        assert search_result.content[0].type == "web_search_result"
+        assert search_result.content[0].url == "https://example.com"
+        assert search_result.content[0].encrypted_content == "Synthetic result text"
+        assert summary.text == "Synthetic search summary"
+
+    def test_accepts_web_search_error_history(self):
+        """
+        What it does: Validates an error result from server-side web search.
+        Purpose: Keep a failed search in history without causing an unrelated HTTP 422.
+        """
+        print("Action: Validating synthetic web search error history...")
+        request = AnthropicMessagesRequest.model_validate({
+            "model": "claude-sonnet-5",
+            "max_tokens": 1024,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "web_search_tool_result",
+                            "tool_use_id": "srvtoolu_test",
+                            "content": {
+                                "type": "web_search_tool_result_error",
+                                "error_code": "unavailable",
+                            },
+                        }
+                    ],
+                },
+                {"role": "user", "content": "continue"},
+            ],
+        })
+
+        error_result = request.messages[0].content[0]
+        print("Verifying typed error content is preserved...")
+        assert error_result.type == "web_search_tool_result"
+        assert error_result.content.type == "web_search_tool_result_error"
+        assert error_result.content.error_code == "unavailable"
+
+
 class TestAnthropicMessagesRequestWithImages:
     """Tests for full AnthropicMessagesRequest with image content."""
     
@@ -623,6 +746,101 @@ class TestAnthropicMessagesRequestWithImages:
         assert request.messages[2].content == "Can you describe it in more detail?"
         
         print("Multi-turn conversation with images validated successfully!")
+
+
+# ==================================================================================================
+# Tests for AnthropicMessage role acceptance
+# ==================================================================================================
+
+class TestAnthropicMessageRoleAcceptance:
+    """
+    Tests for AnthropicMessage role field accepting non-standard roles.
+
+    These tests verify the fix for Issue #190 / #226 - 422 Validation Error
+    when newer Claude Code clients inline role="system" messages in the
+    messages array (e.g. SessionStart hook context).
+
+    Before the fix, role was Literal["user", "assistant"], so Pydantic
+    rejected the request before normalize_message_roles() in
+    converters_core.py had a chance to coerce unknown roles to "user".
+    This mirrors the OpenAI path, where ChatMessage.role is already str.
+    """
+
+    def test_accepts_user_role(self):
+        """
+        What it does: Verifies AnthropicMessage still accepts role="user".
+        Purpose: Regression guard for the standard role.
+        """
+        print("Setup: Creating AnthropicMessage with role='user'...")
+        message = AnthropicMessage(role="user", content="Hello!")
+
+        print(f"Comparing role: Expected 'user', Got '{message.role}'")
+        assert message.role == "user"
+
+    def test_accepts_assistant_role(self):
+        """
+        What it does: Verifies AnthropicMessage still accepts role="assistant".
+        Purpose: Regression guard for the standard role.
+        """
+        print("Setup: Creating AnthropicMessage with role='assistant'...")
+        message = AnthropicMessage(role="assistant", content="Hi there!")
+
+        print(f"Comparing role: Expected 'assistant', Got '{message.role}'")
+        assert message.role == "assistant"
+
+    def test_accepts_system_role(self):
+        """
+        What it does: Verifies AnthropicMessage accepts role="system".
+        Purpose: This is the PRIMARY test for Issue #190 / #226 fix.
+
+        Before the fix, this raised a ValidationError:
+        "Input should be 'user' or 'assistant'".
+        """
+        print("Setup: Creating AnthropicMessage with role='system'...")
+        message = AnthropicMessage(
+            role="system",
+            content="<system-reminder>Injected hook context</system-reminder>"
+        )
+
+        print(f"Comparing role: Expected 'system', Got '{message.role}'")
+        assert message.role == "system"
+
+    def test_accepts_unknown_role(self):
+        """
+        What it does: Verifies AnthropicMessage accepts arbitrary roles
+        (e.g. "developer"), matching the OpenAI path where role is str.
+        Purpose: Handle the entire class of unknown-role issues, not just
+        "system" - normalize_message_roles() coerces them all downstream.
+        """
+        print("Setup: Creating AnthropicMessage with role='developer'...")
+        message = AnthropicMessage(role="developer", content="Context")
+
+        print(f"Comparing role: Expected 'developer', Got '{message.role}'")
+        assert message.role == "developer"
+
+    def test_request_with_inline_system_message_validates(self):
+        """
+        What it does: Verifies a full AnthropicMessagesRequest containing an
+        inline system-role message validates without a 422.
+        Purpose: Reproduces the exact Claude Code request shape from
+        Issue #190 / #226 (system message mid-conversation).
+        """
+        print("Setup: Request with inline system-role message...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4-5",
+            max_tokens=1024,
+            system="You are a helpful assistant.",
+            messages=[
+                AnthropicMessage(role="user", content="Hello!"),
+                AnthropicMessage(role="assistant", content="Hi!"),
+                AnthropicMessage(role="system", content="Hook context update"),
+                AnthropicMessage(role="user", content="Continue please"),
+            ]
+        )
+
+        print(f"Result messages count: {len(request.messages)}")
+        assert len(request.messages) == 4
+        assert request.messages[2].role == "system"
 
 
 # ==================================================================================================

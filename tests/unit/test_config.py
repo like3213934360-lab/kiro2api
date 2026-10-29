@@ -354,10 +354,13 @@ class TestServerHostConfig:
         with patch.dict(os.environ, {}, clear=False):
             if "SERVER_HOST" in os.environ:
                 del os.environ["SERVER_HOST"]
-            
+
             import importlib
-            import kiro.config as config_module
-            importlib.reload(config_module)
+            # The repository's local .env may set SERVER_HOST for real
+            # deployments; ignore it so the built-in default is exercised.
+            with patch("dotenv.load_dotenv", lambda *a, **k: False):
+                import kiro.config as config_module
+                importlib.reload(config_module)
             
             print(f"SERVER_HOST: {config_module.SERVER_HOST}")
             print(f"DEFAULT_SERVER_HOST: {config_module.DEFAULT_SERVER_HOST}")
@@ -1075,3 +1078,37 @@ class TestModelsCatalogHostConfig:
         print(f"Received: {host}")
         print("Verification: trailing slash stripped, region ignored...")
         assert host == "https://mirror.local"
+
+class TestStreamKeepaliveIntervalConfig:
+    """Tests for STREAM_KEEPALIVE_INTERVAL configuration."""
+    
+    def test_default_keepalive_interval(self):
+        """
+        What it does: Verifies the default keepalive interval.
+        Purpose: Ensure keepalive is enabled by default at 10 seconds.
+        """
+        print("Setup: Removing STREAM_KEEPALIVE_INTERVAL from environment...")
+        
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("STREAM_KEEPALIVE_INTERVAL", None)
+            import importlib
+            import kiro.config as config_module
+            importlib.reload(config_module)
+            
+            print(f"STREAM_KEEPALIVE_INTERVAL: {config_module.STREAM_KEEPALIVE_INTERVAL}")
+            assert config_module.STREAM_KEEPALIVE_INTERVAL == 10.0
+    
+    def test_keepalive_interval_from_environment(self):
+        """
+        What it does: Verifies the keepalive interval is read from the environment.
+        Purpose: Ensure STREAM_KEEPALIVE_INTERVAL can be tuned or set to 0 to disable.
+        """
+        print("Setup: STREAM_KEEPALIVE_INTERVAL=0...")
+        
+        with patch.dict(os.environ, {"STREAM_KEEPALIVE_INTERVAL": "0"}):
+            import importlib
+            import kiro.config as config_module
+            importlib.reload(config_module)
+            
+            print(f"STREAM_KEEPALIVE_INTERVAL: {config_module.STREAM_KEEPALIVE_INTERVAL}")
+            assert config_module.STREAM_KEEPALIVE_INTERVAL == 0.0

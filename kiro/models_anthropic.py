@@ -104,7 +104,17 @@ class ToolResultContentBlock(BaseModel):
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: str
     content: Optional[
-        Union[str, List[Union["TextContentBlock", "ImageContentBlock", "ToolReferenceContentBlock"]]]
+        Union[
+            str,
+            List[
+                Union[
+                    "TextContentBlock",
+                    "ImageContentBlock",
+                    "DocumentContentBlock",
+                    "ToolReferenceContentBlock",
+                ]
+            ],
+        ]
     ] = None
     is_error: Optional[bool] = None
 
@@ -129,6 +139,27 @@ class ServerToolUseContentBlock(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class WebSearchResultBlock(BaseModel):
+    """One result nested inside an Anthropic web-search tool result."""
+
+    type: Literal["web_search_result"] = "web_search_result"
+    title: str = ""
+    url: str = ""
+    encrypted_content: str = ""
+    page_age: Optional[str] = None
+
+    model_config = {"extra": "allow"}
+
+
+class WebSearchToolResultErrorContentBlock(BaseModel):
+    """Error returned by Anthropic-compatible server-side web search."""
+
+    type: Literal["web_search_tool_result_error"] = "web_search_tool_result_error"
+    error_code: str = "unknown"
+
+    model_config = {"extra": "allow"}
+
+
 class WebSearchToolResultContentBlock(BaseModel):
     """
     Web search tool result content block (Anthropic server tools).
@@ -140,7 +171,14 @@ class WebSearchToolResultContentBlock(BaseModel):
 
     type: Literal["web_search_tool_result"] = "web_search_tool_result"
     tool_use_id: str
-    content: Any = None
+    content: Optional[
+        Union[
+            List[WebSearchResultBlock],
+            WebSearchToolResultErrorContentBlock,
+            List[Dict[str, Any]],
+            Dict[str, Any],
+        ]
+    ] = None
 
     model_config = {"extra": "allow"}
 
@@ -212,6 +250,44 @@ class ImageContentBlock(BaseModel):
     source: Union[Base64ImageSource, URLImageSource]
 
 
+class Base64DocumentSource(BaseModel):
+    """
+    Base64-encoded document source in Anthropic format.
+
+    Claude Code sends PDFs read from disk as document blocks with
+    base64 sources.
+    """
+
+    type: Literal["base64"] = "base64"
+    media_type: str
+    data: str
+
+
+class URLDocumentSource(BaseModel):
+    """
+    URL-based document source in Anthropic format.
+    """
+
+    type: Literal["url"] = "url"
+    url: str
+
+
+class DocumentContentBlock(BaseModel):
+    """
+    Document content block in Anthropic format.
+
+    Represents a document such as a PDF included in a message.
+    """
+
+    type: Literal["document"] = "document"
+    source: Union[Base64DocumentSource, URLDocumentSource, Dict[str, Any]]
+    title: Optional[str] = None
+    context: Optional[str] = None
+    cache_control: Optional[Dict[str, Any]] = None
+
+    model_config = {"extra": "allow"}
+
+
 # Union type for all content blocks (including images and thinking)
 # UnknownContentBlock must stay last: its permissive ``type: str`` matches any
 # block, so the specific Literal-typed blocks above take precedence.
@@ -219,6 +295,7 @@ ContentBlock = Union[
     TextContentBlock,
     ThinkingContentBlock,
     ImageContentBlock,
+    DocumentContentBlock,
     ToolUseContentBlock,
     ToolResultContentBlock,
     ToolReferenceContentBlock,
@@ -238,11 +315,15 @@ class AnthropicMessage(BaseModel):
     Message in Anthropic format.
 
     Attributes:
-        role: Message role (user, assistant, or system)
+        role: Message role. Normally "user" or "assistant", but some clients
+            (e.g. Claude Code) occasionally send other values such as "system"
+            for injected context. These are accepted here and coerced to "user"
+            downstream by normalize_message_roles() in converters_core.py,
+            instead of rejecting the whole request with a 422.
         content: Message content (string or list of content blocks)
     """
 
-    role: Literal["user", "assistant", "system"]
+    role: str
     content: Union[str, List[ContentBlock]]
 
     model_config = {"extra": "allow"}

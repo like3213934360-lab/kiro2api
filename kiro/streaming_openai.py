@@ -44,6 +44,7 @@ from kiro.config import (
     FIRST_TOKEN_TIMEOUT,
     FIRST_TOKEN_MAX_RETRIES,
     FAKE_REASONING_HANDLING,
+    STREAM_KEEPALIVE_INTERVAL,
 )
 from kiro.tokenizer import count_tokens, count_message_tokens, count_tools_tokens
 
@@ -56,7 +57,11 @@ from kiro.streaming_core import (
     extract_credits_used,
     log_usage_summary,
     stream_with_first_token_retry as stream_with_first_token_retry_core,
+    with_keepalive,
 )
+
+# SSE comment line: ignored by clients per the SSE spec, but keeps bytes flowing
+OPENAI_KEEPALIVE_COMMENT = ": keepalive\n\n"
 
 if TYPE_CHECKING:
     from kiro.auth import KiroAuthManager
@@ -71,6 +76,34 @@ except ImportError:
 
 # Re-export FirstTokenTimeoutError for backward compatibility
 __all__ = ['FirstTokenTimeoutError', 'stream_kiro_to_openai', 'stream_with_first_token_retry', 'collect_stream_response']
+
+
+# Native tool-call serialization markers that some models (notably deepseek)
+# leak into the assistant text content. Structured tool_calls are parsed
+# separately, so anything from the first marker onward is duplicate garbage
+# and must be stripped from `content`.
+_TOOL_MARKUP_MARKERS = (
+    "<｜DSML｜",            # <｜DSML｜...   (deepseek DSML function_calls)
+    "<｜tool▁calls▁begin｜>",  # <｜tool▁calls▁begin｜>
+    "<｜tool▁call▁begin｜>",   # <｜tool▁call▁begin｜>
+)
+
+
+def strip_tool_markup(text: Optional[str]) -> Optional[str]:
+    """Remove leaked native tool-call markup from assistant content.
+
+    deepseek (and similar) emit their tool-call serialization as raw text in
+    `content` even though the gateway also extracts structured tool_calls.
+    Cut from the earliest known marker to the end of the string.
+    """
+    if not text:
+        return text
+    cut = min((p for p in (text.find(m) for m in _TOOL_MARKUP_MARKERS) if p != -1), default=-1)
+    if cut == -1:
+        return text
+    cleaned = text[:cut].rstrip()
+    logger.debug(f"Stripped leaked tool-call markup from content ({len(text) - len(cleaned)} chars removed)")
+    return cleaned
 
 
 async def stream_kiro_to_openai_internal(
@@ -540,7 +573,8 @@ async def stream_with_first_token_retry(
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
-    on_usage=None
+    on_usage=None,
+    keepalive_interval: float = STREAM_KEEPALIVE_INTERVAL
 ) -> AsyncGenerator[str, None]:
     """
     Streaming with automatic retry on first token timeout.
@@ -566,7 +600,7 @@ async def stream_with_first_token_retry(
         request_messages: Original request messages (for fallback token counting)
         request_tools: Original request tools (for fallback token counting)
         on_usage: Optional callback with final usage dict (external key quotas)
-
+        keepalive_interval: Seconds of silence before sending an SSE comment (0 disables)
     Yields:
         Strings in SSE format
 
@@ -611,14 +645,18 @@ async def stream_with_first_token_retry(
         ):
             yield chunk
     
-    async for chunk in stream_with_first_token_retry_core(
-        make_request=make_request,
-        stream_processor=stream_processor,
-        initial_response=initial_response,
-        max_retries=max_retries,
-        first_token_timeout=first_token_timeout,
-        on_http_error=create_http_error,
-        on_all_retries_failed=create_timeout_error,
+    async for chunk in with_keepalive(
+        stream_with_first_token_retry_core(
+            make_request=make_request,
+            stream_processor=stream_processor,
+            initial_response=initial_response,
+            max_retries=max_retries,
+            first_token_timeout=first_token_timeout,
+            on_http_error=create_http_error,
+            on_all_retries_failed=create_timeout_error,
+        ),
+        OPENAI_KEEPALIVE_COMMENT,
+        keepalive_interval,
     ):
         yield chunk
 
@@ -702,6 +740,10 @@ async def collect_stream_response(
         except (json.JSONDecodeError, IndexError):
             continue
     
+    # Strip any leaked native tool-call markup (e.g. deepseek's <｜DSML｜...) from
+    # content; structured tool_calls are already accumulated separately above.
+    full_content = strip_tool_markup(full_content)
+
     # Form final response
     message = {"role": "assistant", "content": full_content}
     if full_reasoning_content:
