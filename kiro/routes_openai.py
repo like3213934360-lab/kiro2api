@@ -309,9 +309,14 @@ async def get_models(request: Request):
             )
         )
 
-    # Expose explicit thinking-level variants for the three main Kiro 5.x
-    # models. Picking one pins that effort without any client configuration.
-    for base in ("claude-opus-5.5", "claude-sonnet-5", "claude-haiku-5.5"):
+    # Expose explicit thinking-level variants for the main Kiro 5.x models.
+    # Picking one pins that effort without any client configuration.
+    for base in (
+        "claude-opus-5.5",
+        "claude-sonnet-5",
+        "claude-sonnet-5.5",
+        "claude-haiku-5.5",
+    ):
         if base not in available_model_ids:
             continue
         limits = limits_by_model.get(base, {})
