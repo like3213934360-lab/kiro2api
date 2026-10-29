@@ -56,7 +56,7 @@ from kiro.streaming_anthropic import (
     WebSearchContinuationItem,
 )
 from kiro.streaming_core import EmptyKiroResponseError
-from kiro.effort import split_effort_suffix
+from kiro.effort import effort_from_payload, split_effort_suffix
 from kiro.compaction import AUTO_COMPACT_TOKENS, maybe_compact_request
 from kiro.payload_guards import check_payload_size
 from kiro.http_client import KiroHttpClient
@@ -598,6 +598,8 @@ async def messages(
                     }
                 )
             
+            request.state.request_log_effort = effort_from_payload(kiro_payload)
+
             # Log Kiro payload (only when debug logging is enabled; serializing
             # a 300K-token payload on every request costs real CPU time).
             if debug_logger:
@@ -632,6 +634,7 @@ async def messages(
                         f"[AutoCompact] payload ~{payload_tokens} tokens -> "
                         f"~{int(check_payload_size(kiro_payload) / 3.5)} tokens"
                     )
+            request.state.request_log_effort = effort_from_payload(kiro_payload)
             
             # Create HTTP client
             url = f"{auth_manager.api_host}/generateAssistantResponse"
@@ -956,6 +959,8 @@ async def messages(
             }
         )
     
+    request.state.request_log_effort = effort_from_payload(kiro_payload)
+
     # Log Kiro payload (only when debug logging is enabled; serializing
     # a 300K-token payload on every request costs real CPU time).
     if debug_logger:
@@ -987,6 +992,7 @@ async def messages(
                 f"[AutoCompact] payload ~{payload_tokens} tokens -> "
                 f"~{int(check_payload_size(kiro_payload) / 3.5)} tokens"
             )
+    request.state.request_log_effort = effort_from_payload(kiro_payload)
     
     # Create HTTP client with retry logic
     # For streaming: use per-request client to avoid CLOSE_WAIT leak on VPN disconnect (issue #54)

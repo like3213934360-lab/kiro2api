@@ -272,6 +272,8 @@ async def responses(request: Request, request_data: ResponsesRequest):
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
+            request.state.request_log_effort = effort_from_payload(kiro_payload)
+
             if debug_logger:
                 try:
                     kiro_request_body = json.dumps(kiro_payload, ensure_ascii=False, indent=2).encode("utf-8")
@@ -419,6 +421,8 @@ async def responses(request: Request, request_data: ResponsesRequest):
         kiro_payload = build_kiro_payload(request_data, conversation_id, profile_arn_for_payload)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    request.state.request_log_effort = effort_from_payload(kiro_payload)
 
     if debug_logger:
         try:

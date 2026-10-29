@@ -190,3 +190,15 @@ def build_effort_fields(model_id: str, effort: str) -> Dict[str, Any]:
     if _canonical_model(model_id) in GPT_EFFORT_MODELS:
         return {"reasoning": {"effort": effort}}
     return {"output_config": {"effort": effort}}
+
+
+def effort_from_payload(payload: Dict[str, Any]) -> Optional[str]:
+    """Extract the effort level actually sent to Kiro from a built payload."""
+    fields = (payload or {}).get("additionalModelRequestFields") or {}
+    for key in ("output_config", "reasoning"):
+        block = fields.get(key)
+        if isinstance(block, dict):
+            effort = normalize_effort(block.get("effort"))
+            if effort:
+                return effort
+    return None

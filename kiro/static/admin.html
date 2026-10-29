@@ -54,6 +54,7 @@
   .badge.ok  { background: rgba(62,207,142,.15); color: var(--ok); }
   .badge.bad { background: rgba(255,107,107,.15); color: var(--err); }
   .badge.warn{ background: rgba(255,180,84,.15);  color: var(--warn); }
+  .badge.effort { background: rgba(79,140,255,.15); color: var(--accent); }
   .effort-select { width: auto; padding: 3px 8px; font-size: 11px; margin: 0; border-radius: 6px; }
   .logs { max-height: 430px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .logs-summary { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--muted); margin-bottom: 7px; }
@@ -642,8 +643,9 @@ function renderLogs() {
     const speed = l.stream && typeof l.speed_tps === 'number' ? l.speed_tps.toFixed(1) + ' t/s' : '—';
     const ttfb = l.stream ? fmtDuration(l.ttfb_ms) : '—';
     const errMark = l.error ? ' <span class="badge bad">!</span>' : '';
+    const effortMark = l.effort ? ` <span class="badge effort">${esc(l.effort)}</span>` : '';
     html += `<div class="log-row" data-key="${esc(key)}" onclick="toggleLog(this.dataset.key)">` +
-      `<span>${t}</span><span class="log-model">${esc(ep)} · ${esc(model)}${errMark}</span>` +
+      `<span>${t}</span><span class="log-model">${esc(ep)} · ${esc(model)}${effortMark}${errMark}</span>` +
       `<span><span class="badge ${cls}">${status}</span></span>` +
       `<span>${ttfb}</span><span>${fmtDuration(l.duration_ms)}</span>` +
       `<span>${speed}</span><span>${inTok}/${outTok}</span>` +
@@ -657,6 +659,7 @@ function renderLogs() {
         detail('会话 ID', l.conversation_id) +
         detail('Key', l.key) +
         detail('流式', l.stream ? '是' : '否') +
+        detail('思考等级', l.effort) +
         detail('停止原因', l.stop_reason) +
         detail('工具调用', l.tool_calls) +
         detail('缓存读', l.cache_read_tokens) +

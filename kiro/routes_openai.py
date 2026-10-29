@@ -44,7 +44,7 @@ from kiro.config import (
     MODEL_ALIASES,
     FALLBACK_MODELS,
 )
-from kiro.effort import EFFORT_LEVELS, supports_effort
+from kiro.effort import EFFORT_LEVELS, effort_from_payload, supports_effort
 from kiro.models_openai import (
     OpenAIModel,
     ModelList,
@@ -527,6 +527,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             
+            request.state.request_log_effort = effort_from_payload(kiro_payload)
+
             # Log Kiro payload (only when debug logging is enabled; serializing
             # a 300K-token payload on every request costs real CPU time).
             if debug_logger:
@@ -789,6 +791,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     
+    request.state.request_log_effort = effort_from_payload(kiro_payload)
+
     # Log Kiro payload (only when debug logging is enabled; serializing
     # a 300K-token payload on every request costs real CPU time).
     if debug_logger:
