@@ -54,6 +54,7 @@
   .badge.ok  { background: rgba(62,207,142,.15); color: var(--ok); }
   .badge.bad { background: rgba(255,107,107,.15); color: var(--err); }
   .badge.warn{ background: rgba(255,180,84,.15);  color: var(--warn); }
+  .effort-select { width: auto; padding: 3px 8px; font-size: 11px; margin: 0; border-radius: 6px; }
   .bar { height: 5px; border-radius: 3px; background: #0b101c; border: 1px solid var(--border); overflow: hidden; margin: 3px 0 5px; }
   .bar > i { display: block; height: 100%; background: var(--ok); }
   .bar.warn > i { background: var(--warn); }
@@ -477,20 +478,46 @@ async function loadModels() {
   if (!ok) { show('modelsMsg', typeof data.detail==='string' ? data.detail : '加载失败', false); return; }
   const rows = data.models || [];
   let html = '<div class="ov-row" style="font-size:11px;color:var(--muted)">' +
-    '<span class="ov-id">模型</span><span style="width:80px">默认</span><span style="width:120px">上下文</span><span>可选等级</span></div>';
+    '<span class="ov-id">模型</span><span style="width:190px">默认思考等级</span><span style="width:120px">上下文</span><span>可选等级</span></div>';
   for (const m of rows) {
-    const levels = (m.effort_levels||[]).length ? m.effort_levels.join(' / ') : '—';
-    const def = m.default_effort ? `<span class="badge ok">${m.default_effort}</span>` : '<span style="color:var(--muted)">Kiro 默认</span>';
+    const levels = (m.effort_levels||[]);
+    let control;
+    if (!levels.length) {
+      control = '<span style="color:var(--muted)">—</span>';
+    } else {
+      const inheritLabel = m.default_effort && m.source !== 'override'
+        ? `继承内置 (${m.default_effort})` : '继承内置默认';
+      let options = `<option value="__inherit__" ${m.override === null ? 'selected' : ''}>${inheritLabel}</option>`;
+      options += `<option value="" ${m.override === '' ? 'selected' : ''}>Kiro 默认 (不发 effort)</option>`;
+      for (const level of levels) {
+        options += `<option value="${level}" ${m.override === level ? 'selected' : ''}>${level}</option>`;
+      }
+      control = `<select class="effort-select" onchange="setEffort('${m.id}', this.value)">${options}</select>`;
+    }
     html += `<div class="ov-row">
       <span class="ov-id">${m.id}</span>
-      <span style="width:80px">${def}</span>
+      <span style="width:190px">${control}</span>
       <span style="width:120px">${m.context_window ? fmtNum(m.context_window) + ' tok' : '—'}</span>
-      <span style="font-size:11px;color:var(--muted)">${levels}</span>
+      <span style="font-size:11px;color:var(--muted)">${levels.length ? levels.join(' / ') : '—'}</span>
     </div>`;
   }
   if (!rows.length) html = '<span style="color:var(--muted);font-size:12px">无模型</span>';
   document.getElementById('modelsBody').innerHTML = html;
   show('modelsMsg', '已更新 ' + new Date().toLocaleTimeString(), true);
+}
+
+async function setEffort(model, value) {
+  const effort = value === '__inherit__' ? null : value;
+  const { ok, data } = await api('/admin/models/effort', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, effort })
+  });
+  if (ok) {
+    show('modelsMsg', `${model} → ${data.default_effort || 'Kiro 默认'}`, true);
+    await loadModels();
+  } else {
+    show('modelsMsg', typeof data.detail==='string' ? data.detail : '保存失败', false);
+  }
 }
 
 // ---- Overview ----

@@ -31,9 +31,10 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from kiro.config import HIDDEN_MODELS, MODEL_EFFORT_DEFAULTS, STRIP_BILLING_HEADER
+from kiro.config import HIDDEN_MODELS, STRIP_BILLING_HEADER
 from kiro.model_resolver import get_model_id_for_kiro
 from kiro.effort import resolve_effort, split_effort_suffix
+from kiro.effort_store import get_effective_default
 from kiro.mcp_tools import generate_search_summary
 from kiro.models_anthropic import (
     AnthropicMessagesRequest,
@@ -828,7 +829,7 @@ def anthropic_to_kiro(
         model_id,
         output_config=getattr(request, "output_config", None),
         thinking=request.thinking,
-        default_effort=MODEL_EFFORT_DEFAULTS.get(model_id),
+        default_effort=get_effective_default(model_id),
     )
     if json_schema:
         # Structured output must be pure JSON; thinking text would break it.

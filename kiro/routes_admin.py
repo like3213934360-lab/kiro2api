@@ -53,6 +53,12 @@ from kiro.config import (
     MODEL_EFFORT_DEFAULTS,
 )
 from kiro.effort import EFFORT_LEVELS, supports_effort
+from kiro.effort_store import (
+    all_overrides,
+    get_effective_default,
+    get_override,
+    set_override,
+)
 from kiro.routes_openai import verify_api_key, extract_bearer_key
 from kiro.credits import credits_service
 
@@ -385,21 +391,65 @@ async def admin_models(request: Request):
         if not model_id:
             continue
         limits = item.get("tokenLimits", {})
+        supported = supports_effort(model_id)
+        override = get_override(model_id)
+        if not supported:
+            source = "unsupported"
+        elif override is None:
+            source = "builtin"
+        elif override == "":
+            source = "kiro_default"
+        else:
+            source = "override"
         rows.append(
             {
                 "id": model_id,
                 "context_window": limits.get("maxInputTokens"),
                 "max_output_tokens": limits.get("maxOutputTokens"),
-                "default_effort": MODEL_EFFORT_DEFAULTS.get(model_id) or None,
-                "effort_levels": (
-                    list(EFFORT_LEVELS) if supports_effort(model_id) else []
-                ),
+                "default_effort": get_effective_default(model_id),
+                "override": override,
+                "source": source,
+                "effort_levels": list(EFFORT_LEVELS) if supported else [],
             }
         )
     rows.sort(key=lambda row: row["id"])
     return {
         "models": rows,
         "defaults": dict(MODEL_EFFORT_DEFAULTS),
+        "overrides": all_overrides(),
+    }
+
+
+@router.post("/admin/models/effort", dependencies=[Depends(require_admin)])
+async def admin_set_model_effort(request: Request):
+    """Change (or reset) a model's default effort at runtime."""
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    model_id = payload.get("model")
+    effort = payload.get("effort")
+    if not isinstance(model_id, str) or not model_id:
+        raise HTTPException(status_code=400, detail="model is required")
+    if effort is not None and not isinstance(effort, str):
+        raise HTTPException(status_code=400, detail="effort must be a string")
+    if effort not in (None, "") and effort not in EFFORT_LEVELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"effort must be one of {', '.join(EFFORT_LEVELS)} or empty",
+        )
+    if not supports_effort(model_id):
+        raise HTTPException(
+            status_code=400, detail=f"{model_id} does not support reasoning effort"
+        )
+
+    set_override(model_id, effort if effort != "" else "")
+    return {
+        "ok": True,
+        "model": model_id,
+        "override": get_override(model_id),
+        "default_effort": get_effective_default(model_id),
     }
 
 

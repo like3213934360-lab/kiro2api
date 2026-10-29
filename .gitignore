@@ -43,3 +43,6 @@ gateway.pid
 gateway.log
 gateway.out.log
 gateway.err.log
+
+# Runtime admin overrides (model effort defaults)
+effort_defaults.json
