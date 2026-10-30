@@ -6844,7 +6844,8 @@ class TestAutoPruneContext:
 
         monkeypatch.setattr(cc, "auto_prune_threshold", lambda model_id=None: 1000)
         monkeypatch.setattr(cc, "AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS", 2)
-        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_CHARS", 200)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_HEAD_CHARS", 100)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_TAIL_CHARS", 100)
 
         def result(tool_id, text):
             return {
@@ -6922,20 +6923,25 @@ class TestAutoPruneContext:
     def test_threshold_scales_with_model_window(self):
         """
         What it does: Compares the prune threshold for different model windows.
-        Purpose: 1M-context sessions must not be rewritten every turn; small
-                 windows still need protection.
+        Purpose: The threshold follows the window, and for a 1M window it sits
+                 well below the limit: per-round latency doubles past ~300K, so
+                 waiting for 85% would pay the slow path for hundreds of turns.
         """
         import kiro.converters_core as cc
+        from kiro.config import AUTO_CONTEXT_PRUNE_RATIO
 
         big = cc.auto_prune_threshold("claude-opus-5.5")
         small = cc.auto_prune_threshold("claude-sonnet-4.5")
         unknown = cc.auto_prune_threshold("some-unknown-model")
         suffixed = cc.auto_prune_threshold("claude-opus-5.5-xhigh")
 
-        assert big == int(1_000_000 * 0.85)
-        assert small == int(200_000 * 0.85)
+        assert big == int(1_000_000 * AUTO_CONTEXT_PRUNE_RATIO)
+        assert small == int(200_000 * AUTO_CONTEXT_PRUNE_RATIO)
         assert unknown == 220_000
         assert suffixed == big
+        # Latency budget, not capacity: a 1M window must start pruning far below
+        # the point where rounds got measurably slower (~300K).
+        assert big <= 400_000
 
     def test_pruning_is_rare_and_hysteretic(self, monkeypatch):
         """
@@ -6947,7 +6953,8 @@ class TestAutoPruneContext:
 
         monkeypatch.setattr(cc, "model_max_input_tokens", lambda model_id: 6_000)
         monkeypatch.setattr(cc, "AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS", 2)
-        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_CHARS", 200)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_HEAD_CHARS", 100)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_TAIL_CHARS", 100)
 
         def result(tool_id, text):
             return {"content": [{"text": text}], "status": "success", "toolUseId": tool_id}
@@ -7024,7 +7031,8 @@ class TestAutoPruneContext:
 
         monkeypatch.setattr(cc, "auto_prune_threshold", lambda model_id=None: 1000)
         monkeypatch.setattr(cc, "AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS", 1)
-        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_CHARS", 100)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_HEAD_CHARS", 50)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_TAIL_CHARS", 50)
         set_client_prompt_tokens(None)
 
         payload = {
@@ -7090,7 +7098,8 @@ class TestAutoPruneContext:
 
         monkeypatch.setattr(cc, "auto_prune_threshold", lambda model_id=None: 1000)
         monkeypatch.setattr(cc, "AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS", 1)
-        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_CHARS", 100)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_HEAD_CHARS", 50)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_TAIL_CHARS", 50)
 
         set_client_prompt_tokens(1_447_004)
         payload = {
@@ -7111,3 +7120,102 @@ class TestAutoPruneContext:
         assert get_client_prompt_tokens() == 1_447_004
         set_client_prompt_tokens(None)
 
+
+
+class TestPrunePreview:
+    """
+    A cleared tool result keeps both ends.
+
+    Command output puts its verdict at the end ("exit=1", "0 errors", the failing
+    assertion). A head-only preview cut exactly that away, so the model could not
+    tell whether the check it had just run passed and ran it again — the cause of
+    the 71-identical-grep loop.
+    """
+
+    def test_keeps_head_and_tail(self):
+        """
+        What it does: Prunes a long synthetic result with a known ending.
+        Purpose: The verdict must survive the rewrite.
+        """
+        from kiro.converters_core import prune_preview
+
+        text = "start-of-output\n" + ("x" * 5000) + "\nexit=1"
+        preview = prune_preview(text)
+
+        assert preview.startswith("start-of-output")
+        assert preview.endswith("exit=1")
+        assert len(preview) < len(text) // 5
+
+    def test_marker_explains_what_happened(self):
+        """
+        What it does: Checks the injected marker text.
+        Purpose: The model must know it can re-run the tool for the middle, and
+                 that nothing was lost on the client side.
+        """
+        from kiro.converters_core import prune_preview
+
+        preview = prune_preview("A" * 10_000)
+
+        assert "cleared automatically" in preview
+        assert "re-run the tool" in preview
+
+    def test_short_result_is_untouched(self):
+        """
+        What it does: Prunes a result shorter than the preview budget.
+        Purpose: Small outputs are already cheap; rewriting them would only
+                 churn the cached prefix.
+        """
+        from kiro.converters_core import prune_preview
+
+        short = "BUILD SUCCESSFUL"
+        assert prune_preview(short) == short
+
+    def test_keeps_a_failing_test_summary(self):
+        """
+        What it does: Prunes a build log whose conclusion is a failure count.
+        Purpose: Real workload shape — the numbers the model needs are last.
+        """
+        from kiro.converters_core import prune_preview
+
+        log = "Compiling 312 files...\n" + ("warning: unused import\n" * 400) + "FAILED: 3 tests failed"
+        preview = prune_preview(log)
+
+        assert preview.endswith("FAILED: 3 tests failed")
+        assert preview.startswith("Compiling 312 files")
+
+
+class TestAutoPruneKeepsTheVerdict:
+    """End-to-end: pruning must not hide whether a command succeeded."""
+
+    def test_pruned_result_still_ends_with_its_exit_code(self, monkeypatch):
+        """
+        What it does: Prunes a payload whose old result ends with "exit=1".
+        Purpose: Regression guard for the repeated-command loop. The model must
+                 still see that the check already returned exit=1.
+        """
+        import kiro.converters_core as cc
+
+        monkeypatch.setattr(cc, "auto_prune_threshold", lambda model_id=None: 1000)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS", 1)
+
+        def result(tool_id, text):
+            return {"content": [{"text": text}], "status": "success", "toolUseId": tool_id}
+
+        payload = {
+            "conversationState": {
+                "history": [
+                    {"userInputMessage": {"userInputMessageContext": {"toolResults": [
+                        result(f"old-{i}", "grep -rn StarWindowInsets\n" + ("m" * 3000) + "\nexit=1")
+                    ]}}}
+                    for i in range(4)
+                ],
+                "currentMessage": {"userInputMessage": {"content": "continue"}},
+            }
+        }
+
+        assert auto_prune_context(payload) > 0
+
+        first = payload["conversationState"]["history"][0]["userInputMessage"]["userInputMessageContext"]["toolResults"][0]
+        text = first["content"][0]["text"]
+        assert text.endswith("exit=1")
+        assert "grep -rn StarWindowInsets" in text

@@ -351,17 +351,26 @@ FALLBACK_MODELS: List[Dict[str, Any]] = [
 # Automatic Context Pruning
 # ==================================================================================================
 #
-# Old tool results are shortened only when the conversation gets close to the
-# model's input window, and then aggressively enough that the following turns
-# don't need pruning again.
+# Old tool results are shortened once the conversation grows past this share of
+# the model window, and then aggressively enough that the following turns don't
+# need pruning again.
 #
-# Why "rare and deep" instead of "a little every turn": Kiro's prefix cache is
-# keyed on the request bytes, so rewriting one old tool result invalidates every
-# cached token after it. Measured on the live API: turns that rewrote history
-# hit the cache 0% of the time; turns that did not hit roughly 90% of the time
-# and were billed ~10% of the uncached price. Keeping the rewrite rare keeps the
-# cache warm, which matters far more than shaving a few thousand tokens.
-AUTO_CONTEXT_PRUNE_RATIO: float = 0.85
+# Why not just "near the window": measured on live sessions, per-round latency
+# grows with prompt size long before any limit is reached — 5.8s below 50K,
+# 8.8s at 150-300K, 14.7s above 300K, with a third of the turns sitting in the
+# slowest bucket. Waiting for 85% of a 1M window (850K) therefore means paying
+# the slow path for hundreds of turns that were never close to overflowing. 0.40
+# (400K here) keeps a long session in the ~8s band while staying far from the
+# limit.
+#
+# Why not prune a little on every turn: Kiro's prefix cache is keyed on the
+# request bytes, so rewriting one old tool result invalidates every cached token
+# after it. Measured on the live API: turns that rewrote history hit the cache
+# 0% of the time; turns that did not hit roughly 90% of the time and were billed
+# ~10% of the uncached price. Pruning is deterministic for a given history, so
+# the rewrite is stable across turns and the cache survives; the threshold is
+# what decides how often a *new* result crosses the boundary.
+AUTO_CONTEXT_PRUNE_RATIO: float = 0.40
 
 # Threshold used when the model window is unknown (legacy behaviour).
 AUTO_CONTEXT_PRUNE_FALLBACK_TOKENS: int = 220_000

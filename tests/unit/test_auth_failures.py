@@ -40,8 +40,8 @@ class FakeClock:
 
 
 def make_request(
-    path: str = "/v1/models",
-    method: str = "GET",
+    path: str = "/v1/chat/completions",
+    method: str = "POST",
     client=("127.0.0.1", 51000),
 ) -> Request:
     """Build a real Starlette Request with a controllable client address."""
@@ -145,7 +145,7 @@ class TestFirstAttemptLogging:
         message = logged[0]["message"]
         assert "Rejected OpenAI request" in message
         assert "127.0.0.1:51000" in message
-        assert "GET /v1/models" in message
+        assert "POST /v1/chat/completions" in message
         assert REASON_MISSING_CREDENTIALS in message
         assert "no key" in message
         # Actionable part: tell the user how to authenticate.
@@ -324,16 +324,16 @@ class TestThrottling:
     def test_different_paths_are_tracked_separately(self, loguru_records):
         """
         What it does: Verifies throttling is per endpoint.
-        Purpose: A probe on /v1/models must not mute /v1/chat/completions.
+        Purpose: A failure on one endpoint must not mute another.
         """
         logger = UnauthorizedAttemptLogger(clock=FakeClock())
 
         logger.report(
-            scheme="OpenAI", request=make_request(path="/v1/models"),
+            scheme="OpenAI", request=make_request(path="/v1/chat/completions"),
             reason=REASON_MISSING_CREDENTIALS,
         )
         logger.report(
-            scheme="OpenAI", request=make_request(path="/v1/chat/completions"),
+            scheme="OpenAI", request=make_request(path="/v1/messages"),
             reason=REASON_MISSING_CREDENTIALS,
         )
 
@@ -541,3 +541,62 @@ class TestSharedLogger:
 
         assert emitted is True
         assert len(warnings(loguru_records)) == 2
+
+
+class TestCapabilityProbe:
+    """Anonymous model-list polling is discovery, not an auth attack."""
+
+    def test_keyless_model_list_stays_at_debug(self, loguru_records):
+        """
+        What it does: Reports a missing key on GET /v1/models.
+        Purpose: Desktop and editor clients poll this to find a local gateway.
+                 Warning per poll flooded the log (measured: 231 in four hours)
+                 and polluted authentication statistics.
+        """
+        logger = UnauthorizedAttemptLogger(clock=FakeClock())
+
+        logger.report(
+            scheme="OpenAI",
+            request=make_request(path="/v1/models", method="GET"),
+            reason=REASON_MISSING_CREDENTIALS,
+        )
+
+        assert warnings(loguru_records) == []
+        debugged = [
+            r for r in loguru_records
+            if r["level"].name == "DEBUG" and "GET /v1/models" in r["message"]
+        ]
+        assert debugged
+
+    def test_wrong_key_on_model_list_still_warns(self, loguru_records):
+        """
+        What it does: Reports an invalid key on the same endpoint.
+        Purpose: A presented-but-wrong key is a real authentication failure and
+                 must stay visible.
+        """
+        logger = UnauthorizedAttemptLogger(clock=FakeClock())
+
+        logger.report(
+            scheme="OpenAI",
+            request=make_request(path="/v1/models", method="GET"),
+            reason=REASON_UNKNOWN_KEY,
+            key="sk-wrong-key-1234567890",
+        )
+
+        assert len(warnings(loguru_records)) == 1
+
+    def test_post_to_models_still_warns(self, loguru_records):
+        """
+        What it does: Reports a missing key on a non-GET request to the same path.
+        Purpose: Only the read-only discovery probe is quiet; anything else keeps
+                 the security signal.
+        """
+        logger = UnauthorizedAttemptLogger(clock=FakeClock())
+
+        logger.report(
+            scheme="OpenAI",
+            request=make_request(path="/v1/models", method="POST"),
+            reason=REASON_MISSING_CREDENTIALS,
+        )
+
+        assert len(warnings(loguru_records)) == 1

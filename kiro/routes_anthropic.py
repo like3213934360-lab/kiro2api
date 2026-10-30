@@ -65,10 +65,10 @@ from kiro.effort import effort_from_payload, split_effort_suffix
 from kiro.compaction import auto_compact_threshold, maybe_compact_request
 from kiro.request_log import note_payload_estimate
 from kiro.request_context import set_client_prompt_tokens
-from kiro.payload_guards import check_payload_size
+from kiro.payload_guards import check_payload_size, exceeds_input_window
 from kiro.http_client import KiroHttpClient
 from kiro.utils import conversation_diagnostic_id, resolve_conversation_id, summarize_cache_prefix
-from kiro.tokenizer import estimate_request_tokens
+from kiro.tokenizer import estimate_request_tokens, estimate_request_tokens_async
 from kiro.config import WEB_SEARCH_ENABLED
 from kiro.mcp_tools import generate_search_summary, handle_native_web_search
 from kiro.routes_openai import make_usage_reporter
@@ -345,12 +345,13 @@ async def messages(
         ]
     else:
         _system_for_estimate = request_data.system
-    estimated_input_tokens = estimate_request_tokens(
+    estimated_input_tokens = await estimate_request_tokens_async(
         messages=_messages_for_estimate,
         tools=_tools_for_estimate,
         system_prompt=_system_for_estimate,
         apply_claude_correction=False,
-    )["total_tokens"]
+    )
+    estimated_input_tokens = estimated_input_tokens["total_tokens"]
 
     # This measures the conversation as the client holds it, before the gateway
     # prunes tool results or summarises older turns. It is what the client must
@@ -589,7 +590,7 @@ async def messages(
             model_resolver = account.model_resolver
 
             max_input_tokens = model_cache.get_max_input_tokens(base_model_name)
-            if estimated_input_tokens > max_input_tokens - 1024:
+            if exceeds_input_window(estimated_input_tokens, max_input_tokens):
                 return _context_too_long_response(
                     request_data.model, estimated_input_tokens, max_input_tokens
                 )
@@ -662,6 +663,23 @@ async def messages(
                         f"[AutoCompact] payload ~{payload_tokens} tokens -> "
                         f"~{int(check_payload_size(kiro_payload) / 3.5)} tokens"
                     )
+
+            # Last line of defence: even after compaction the prompt can still be
+            # larger than the window (summarisation failed, or the recent working
+            # set alone is too big). Sending it anyway lets Kiro truncate the
+            # tail silently; returning Anthropic's standard error makes the client
+            # compact instead, which is the only side that can actually shrink the
+            # conversation it holds.
+            final_payload_tokens = int(check_payload_size(kiro_payload) / 3.5)
+            if exceeds_input_window(final_payload_tokens, max_input_tokens):
+                logger.warning(
+                    f"[ContextTooLong] payload ~{final_payload_tokens} tokens > "
+                    f"{max_input_tokens}; asking the client to compact"
+                )
+                return _context_too_long_response(
+                    request_data.model, max(final_payload_tokens, estimated_input_tokens),
+                    max_input_tokens,
+                )
             note_payload_estimate(request, kiro_payload)
             request.state.request_log_effort = effort_from_payload(kiro_payload)
             

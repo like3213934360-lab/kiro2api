@@ -48,6 +48,28 @@ def check_payload_size(payload: Dict[str, Any]) -> int:
     return len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
 
 
+def exceeds_input_window(payload_tokens: int, max_input_tokens: int, reserve_tokens: int = 1024) -> bool:
+    """
+    Decide whether a prompt is too large to send upstream.
+
+    Used after compaction as a last line of defence. Returning Anthropic's
+    standard "prompt is too long" error makes the client shrink the
+    conversation it holds; sending an oversized prompt instead lets the upstream
+    truncate the tail silently, which looks like the model forgot the task.
+
+    Args:
+        payload_tokens: Measured prompt size in tokens
+        max_input_tokens: Model input window in tokens
+        reserve_tokens: Headroom kept for the response and protocol overhead
+
+    Returns:
+        True when the prompt no longer fits
+    """
+    if max_input_tokens <= 0:
+        return False
+    return payload_tokens > max_input_tokens - reserve_tokens
+
+
 def _strip_empty_tool_uses(history: list) -> None:
     """Remove empty toolUses arrays in-place (Kiro quirk)."""
     for entry in history:

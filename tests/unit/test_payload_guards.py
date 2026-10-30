@@ -201,3 +201,48 @@ class TestTrimPayloadToLimit:
         assert not stats.trimmed
         assert stats.original_entries == 0
         assert stats.final_entries == 0
+
+
+class TestExceedsInputWindow:
+    """The post-compaction guard that asks the client to shrink instead of us."""
+
+    def test_prompt_above_the_window_is_rejected(self):
+        """
+        What it does: Checks a prompt larger than the model window.
+        Purpose: Sending it anyway lets the upstream truncate the tail silently,
+                 which looks like the model forgot the task.
+        """
+        from kiro.payload_guards import exceeds_input_window
+
+        assert exceeds_input_window(1_200_000, 1_000_000) is True
+
+    def test_prompt_just_below_the_window_passes(self):
+        """
+        What it does: Checks a prompt that fits.
+        Purpose: Normal requests must never be rejected by this guard.
+        """
+        from kiro.payload_guards import exceeds_input_window
+
+        assert exceeds_input_window(900_000, 1_000_000) is False
+
+    def test_keeps_headroom_for_the_response(self):
+        """
+        What it does: Checks a prompt exactly at the window.
+        Purpose: A prompt that fills the window leaves no room to answer, so the
+                 reserve must still reject it.
+        """
+        from kiro.payload_guards import exceeds_input_window
+
+        assert exceeds_input_window(1_000_000, 1_000_000) is True
+        assert exceeds_input_window(999_500, 1_000_000) is True   # inside the reserve
+        assert exceeds_input_window(998_000, 1_000_000) is False
+
+    def test_unknown_window_never_rejects(self):
+        """
+        What it does: Passes a zero window (model metadata missing).
+        Purpose: An unknown limit must not block traffic; the client's own
+                 compaction is the fallback.
+        """
+        from kiro.payload_guards import exceeds_input_window
+
+        assert exceeds_input_window(10_000_000, 0) is False

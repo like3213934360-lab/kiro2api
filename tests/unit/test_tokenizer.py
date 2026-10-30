@@ -16,6 +16,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from kiro.tokenizer import (
+    estimate_request_tokens_async,
     count_tokens,
     count_message_tokens,
     count_tools_tokens,
@@ -1057,3 +1058,80 @@ class TestTokenizerIntegration:
         assert len(set(results)) == 1, "Results should be consistent"
     
     
+
+
+# ==================================================================================================
+# Non-blocking counting
+# ==================================================================================================
+
+class TestEstimateRequestTokensAsync:
+    """Token counting must not block the request event loop."""
+
+    @pytest.mark.asyncio
+    async def test_returns_the_same_result_as_the_sync_version(self):
+        """
+        What it does: Counts the same short conversation both ways.
+        Purpose: The async wrapper is only a scheduling change; the numbers must
+                 stay identical or every usage report shifts.
+        """
+        messages = [{"role": "user", "content": "hello world"}]
+        sync_result = estimate_request_tokens(messages)
+        async_result = await estimate_request_tokens_async(messages)
+
+        assert async_result == sync_result
+        assert async_result["total_tokens"] > 0
+
+    @pytest.mark.asyncio
+    async def test_runs_off_the_calling_thread(self, monkeypatch):
+        """
+        What it does: Records which thread the counting runs on.
+        Purpose: Counting a 30K-token history takes ~60ms and runs on every
+                 request; inline it serialises concurrent requests behind the
+                 tokenizer.
+        """
+        import threading
+
+        import kiro.tokenizer as tokenizer_module
+
+        seen = {}
+        original = tokenizer_module.estimate_request_tokens
+
+        def spy(*args, **kwargs):
+            seen["thread"] = threading.current_thread()
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(tokenizer_module, "estimate_request_tokens", spy)
+        await estimate_request_tokens_async([{"role": "user", "content": "hi"}])
+
+        assert "thread" in seen
+        assert seen["thread"] is not threading.current_thread()
+
+    @pytest.mark.asyncio
+    async def test_passes_every_argument_through(self, monkeypatch):
+        """
+        What it does: Calls the wrapper with tools, a system prompt and the
+                 correction flag turned off.
+        Purpose: A dropped argument would silently under-count the prompt and
+                 defeat the context guards that depend on it.
+        """
+        import kiro.tokenizer as tokenizer_module
+
+        captured = {}
+
+        def fake(messages, tools=None, system_prompt=None, apply_claude_correction=True):
+            captured.update(messages=messages, tools=tools, system_prompt=system_prompt,
+                            apply_claude_correction=apply_claude_correction)
+            return {"messages_tokens": 1, "tools_tokens": 2, "system_tokens": 3, "total_tokens": 6}
+
+        monkeypatch.setattr(tokenizer_module, "estimate_request_tokens", fake)
+        result = await estimate_request_tokens_async(
+            [{"role": "user", "content": "x"}],
+            tools=[{"name": "t"}],
+            system_prompt="sys",
+            apply_claude_correction=False,
+        )
+
+        assert result["total_tokens"] == 6
+        assert captured["tools"] == [{"name": "t"}]
+        assert captured["system_prompt"] == "sys"
+        assert captured["apply_claude_correction"] is False

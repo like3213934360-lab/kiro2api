@@ -2172,24 +2172,27 @@ class TestUnauthorizedAttemptLogging:
             and "Rejected OpenAI request" in record["message"]
         ]
 
-    def test_repeated_unauthenticated_probes_log_once(
+    def test_unauthenticated_model_probes_are_quiet(
         self, test_client, loguru_records, reset_auth_throttle
     ):
         """
         What it does: Sends three unauthenticated /v1/models probes.
-        Purpose: Local pollers must not produce a warning per request.
+        Purpose: Desktop and editor clients poll the model list to discover a
+                 local gateway. That 401 is correct, but a warning per poll
+                 floods the log (231 in four hours) and pollutes auth stats, so
+                 a keyless model-list probe must stay at DEBUG. Real auth
+                 failures still warn (see test_wrong_key_reports_unknown_key_reason).
         """
         print("Action: GET /v1/models three times without auth...")
         for _ in range(3):
             assert test_client.get("/v1/models").status_code == 401
 
-        logged = self._rejections(loguru_records)
-        print(f"Result: {len(logged)} warning(s)")
-        assert len(logged) == 1
-        message = logged[0]["message"]
-        assert "GET /v1/models" in message
-        assert "missing_credentials" in message
-        assert "Authorization: Bearer" in message
+        assert self._rejections(loguru_records) == []
+        debugged = [
+            record for record in loguru_records
+            if record["level"].name == "DEBUG" and "GET /v1/models" in record["message"]
+        ]
+        assert debugged, "the probe should still be traceable at DEBUG level"
 
     def test_wrong_key_reports_unknown_key_reason(
         self, test_client, loguru_records, reset_auth_throttle, invalid_proxy_api_key
@@ -2233,15 +2236,17 @@ class TestUnauthorizedAttemptLogging:
         What it does: Rejects requests on two endpoints without auth.
         Purpose: Throttling is per endpoint, so both stay visible.
         """
-        print("Action: Unauthenticated /v1/models then /v1/chat/completions...")
-        assert test_client.get("/v1/models").status_code == 401
-        response = test_client.post(
+        print("Action: Unauthenticated /v1/chat/completions then /v1/responses...")
+        assert test_client.post(
             "/v1/chat/completions",
             json={"model": "claude-sonnet-4-5", "messages": [{"role": "user", "content": "hi"}]},
-        )
+        ).status_code == 401
+        assert test_client.post(
+            "/v1/responses",
+            json={"model": "claude-sonnet-4-5", "input": "hi"},
+        ).status_code == 401
 
-        assert response.status_code == 401
         logged = self._rejections(loguru_records)
         assert len(logged) == 2
-        paths = {"/v1/models" in item["message"] for item in logged}
+        paths = {"/v1/chat/completions" in item["message"] for item in logged}
         assert paths == {True, False}

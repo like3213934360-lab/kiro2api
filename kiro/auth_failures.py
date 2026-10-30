@@ -255,6 +255,29 @@ class UnauthorizedAttemptLogger:
         for bucket_key, _ in oldest:
             del self._buckets[bucket_key]
 
+    def _is_capability_probe(self, request: Request, reason: str) -> bool:
+        """
+        Tell capability probes apart from real authentication failures.
+
+        Desktop and editor clients poll ``GET /v1/models`` without a key to learn
+        whether a local gateway is up and which models it serves. That 401 is
+        correct, but logging it as a security warning floods the log (measured:
+        231 warnings in four hours) and pollutes authentication statistics, so a
+        keyless model-list probe is logged at DEBUG instead.
+
+        Args:
+            request: Incoming request
+            reason: Failure reason string
+
+        Returns:
+            True when this is an anonymous model-list probe
+        """
+        if reason != REASON_MISSING_CREDENTIALS:
+            return False
+        if self._request_method(request).upper() != "GET":
+            return False
+        return self._request_path(request).rstrip("/").endswith("/models")
+
     def _emit_warning(
         self,
         *,
@@ -288,6 +311,9 @@ class UnauthorizedAttemptLogger:
                 f" [{suppressed} identical attempt(s) suppressed in the last "
                 f"{self.window_seconds:g}s]"
             )
+        if self._is_capability_probe(request, reason):
+            logger.debug(message)
+            return
         logger.warning(message)
 
 

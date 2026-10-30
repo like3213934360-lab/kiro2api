@@ -96,7 +96,7 @@ from kiro.routes_responses import router as responses_router
 from kiro.routes_admin import router as admin_router
 from kiro.exceptions import validation_exception_handler
 from kiro.debug_middleware import DebugLoggerMiddleware
-from kiro.request_log import request_log_store
+from kiro.request_log import format_perf_line, request_log_store
 
 
 # --- Loguru Configuration ---
@@ -645,11 +645,7 @@ async def log_api_requests(request, call_next):
 
         estimate = entry.get("payload_estimate_tokens")
         if estimate:
-            logger.info(
-                f"[Tokens] reported_in={input_tokens} estimated_prompt={estimate} "
-                f"payload_bytes={entry.get('payload_bytes')} "
-                f"cache={entry.get('cache_hit') or 'unknown'}"
-            )
+            logger.info(format_perf_line(entry))
 
     if hasattr(response, "body_iterator"):
         original_iterator = response.body_iterator

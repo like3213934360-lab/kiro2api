@@ -82,11 +82,37 @@ EMPTY_CONTENT_PLACEHOLDER = "."
 # Kiro's prefix cache for every token after the edit, so it must happen as
 # seldom as possible rather than a little on every turn.
 AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS = 8
-AUTO_PRUNE_PREVIEW_CHARS = 300
+# Preview kept from each cleared tool result. Both ends are kept on purpose:
+# command output puts its verdict at the end ("exit=1", "0 errors", "BUILD
+# SUCCESSFUL", the failing assertion), so a head-only preview cuts away exactly
+# the part the model needs to decide whether to re-run the command. Losing that
+# verdict is what makes a long session repeat the same check dozens of times.
+AUTO_PRUNE_PREVIEW_HEAD_CHARS = 240
+AUTO_PRUNE_PREVIEW_TAIL_CHARS = 240
 AUTO_PRUNE_MARKER = (
     "\n...[older tool result cleared automatically to keep this session fast; "
-    "re-run the tool if you need it]..."
+    "head and tail kept, re-run the tool if you need the middle]...\n"
 )
+
+
+def prune_preview(text: str) -> str:
+    """
+    Shrink a cleared tool result while keeping its start and its verdict.
+
+    Args:
+        text: Original tool-result text
+
+    Returns:
+        The original text when it is already short, otherwise its head and tail
+        joined by AUTO_PRUNE_MARKER
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    head_chars = AUTO_PRUNE_PREVIEW_HEAD_CHARS
+    tail_chars = AUTO_PRUNE_PREVIEW_TAIL_CHARS
+    if len(text) <= head_chars + tail_chars:
+        return text
+    return text[:head_chars] + AUTO_PRUNE_MARKER + text[-tail_chars:]
 
 
 # ==================================================================================================
@@ -1681,13 +1707,13 @@ def auto_prune_context(payload: Dict[str, Any], model_id: Optional[str] = None) 
                 replacement = "[duplicate tool output omitted automatically]"
             else:
                 seen.add(digest)
-                if len(text) <= AUTO_PRUNE_PREVIEW_CHARS:
+                if len(text) <= AUTO_PRUNE_PREVIEW_HEAD_CHARS + AUTO_PRUNE_PREVIEW_TAIL_CHARS:
                     continue
-                # Keep a short preview so the model can tell which result this
-                # was, then clear the rest. This mirrors Anthropic's server-side
-                # clear_tool_uses context editing: the full history stays in the
-                # client, the gateway only edits the outbound prompt.
-                replacement = text[:AUTO_PRUNE_PREVIEW_CHARS] + AUTO_PRUNE_MARKER
+                # Keep the head and the tail so the model can still read the
+                # verdict (exit code, pass/fail summary) of what it ran. The
+                # full history stays in the client; only this outbound prompt is
+                # edited — mirroring Anthropic's server-side clear_tool_uses.
+                replacement = prune_preview(text)
 
             removed += max(0, len(text) - len(replacement))
             pruned_count += 1

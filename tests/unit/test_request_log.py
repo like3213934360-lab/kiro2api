@@ -79,3 +79,53 @@ def test_note_payload_estimate_sets_the_request_context():
     estimate = note_payload_estimate(request, {"a": "x" * 700})
 
     assert get_payload_estimate() == estimate
+
+
+class TestFormatPerfLine:
+    """One greppable line per request, so latency questions do not need guessing."""
+
+    def test_includes_latency_and_token_fields(self):
+        """
+        What it does: Formats a populated request entry.
+        Purpose: ttfb and duration used to live only in the in-memory admin log,
+                 so after a restart the only way to explain a slow turn was to
+                 reconstruct it from the client's own transcripts.
+        """
+        from kiro.request_log import format_perf_line
+
+        line = format_perf_line({
+            "status": 200,
+            "input_tokens": 201_595,
+            "output_tokens": 190,
+            "payload_estimate_tokens": 206_993,
+            "payload_bytes": 724_478,
+            "ttfb_ms": 1234.5,
+            "duration_ms": 6543.2,
+            "speed_tps": 28.4,
+            "cache_hit": "hit",
+            "stream": True,
+        })
+
+        print(line)
+        assert line.startswith("[Perf]")
+        assert "in=201595" in line
+        assert "prompt_est=206993" in line
+        assert "ttfb_ms=1234" in line
+        assert "duration_ms=6543" in line
+        assert "speed_tps=28" in line
+        assert "cache=hit" in line
+
+    def test_missing_values_are_explicit(self):
+        """
+        What it does: Formats an entry without timing data (non-streaming).
+        Purpose: A missing measurement must read as "-", never as 0, which would
+                 look like a real and suspiciously fast request.
+        """
+        from kiro.request_log import format_perf_line
+
+        line = format_perf_line({"status": 200, "input_tokens": 10, "stream": False})
+
+        assert "ttfb_ms=-" in line
+        assert "duration_ms=-" in line
+        assert "speed_tps=-" in line
+        assert "cache=unknown" in line

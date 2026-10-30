@@ -176,3 +176,46 @@ class TestAutoCompactThreshold:
         )
 
         assert result is None
+
+
+class TestSummaryInstructions:
+    """
+    The handoff summary must stop the next turn from redoing finished work.
+
+    A summary that only lists "what is pending" makes the model re-derive facts
+    it already verified; that is how one session ran the same grep 71 times.
+    """
+
+    def test_requires_an_already_verified_checklist(self):
+        """
+        What it does: Inspects the summarisation instruction.
+        Purpose: Confirmed facts and command outcomes must be preserved verbatim,
+                 not summarised away as chit-chat.
+        """
+        from kiro.compaction import _SUMMARY_INSTRUCTION
+
+        instruction = _SUMMARY_INSTRUCTION.lower()
+        assert "already verified" in instruction
+        assert "exit code" in instruction
+        assert "must\nnot repeat work" in instruction or "not repeat work" in instruction
+
+    def test_requires_the_working_tree_state(self):
+        """
+        What it does: Checks that the summary must capture git state.
+        Purpose: Without it the next turn re-runs `git status` to rediscover what
+                 is modified, staged or deleted.
+        """
+        from kiro.compaction import _SUMMARY_INSTRUCTION
+
+        assert "working tree" in _SUMMARY_INSTRUCTION
+        assert "staged" in _SUMMARY_INSTRUCTION
+
+    def test_is_not_an_instruction_to_the_model_being_summarised(self):
+        """
+        What it does: Verifies the prompt stays compact.
+        Purpose: It is prepended to every summarisation call, so bloat costs
+                 tokens on the most expensive request in the session.
+        """
+        from kiro.compaction import _SUMMARY_INSTRUCTION
+
+        assert len(_SUMMARY_INSTRUCTION) < 3000

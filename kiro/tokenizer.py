@@ -32,6 +32,7 @@ empirical observations: Claude tokenizes text approximately 15%
 more than GPT-4 (cl100k_base). This is due to differences in BPE vocabularies.
 """
 
+import asyncio
 import json
 from typing import List, Dict, Any, Optional
 from loguru import logger
@@ -325,3 +326,36 @@ def estimate_request_tokens(
         "system_tokens": system_tokens,
         "total_tokens": messages_tokens + tools_tokens + system_tokens
     }
+
+
+async def estimate_request_tokens_async(
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+    system_prompt: Optional[Any] = None,
+    apply_claude_correction: bool = True,
+) -> Dict[str, int]:
+    """
+    Counts request tokens without blocking the event loop.
+
+    Counting a long conversation is CPU work measured in tens of milliseconds
+    (30K tokens ~ 60ms here, and it grows with history), and the counting runs
+    on every request. Doing it inline serialises every concurrent request
+    behind the tokenizer, so it is pushed to a worker thread.
+
+    Args:
+        messages: List of messages
+        tools: List of tools (optional)
+        system_prompt: System prompt (optional, string or content blocks)
+        apply_claude_correction: Apply correction coefficient for Claude
+
+    Returns:
+        Same dictionary as estimate_request_tokens: messages_tokens, tools_tokens,
+        system_tokens, total_tokens
+    """
+    return await asyncio.to_thread(
+        estimate_request_tokens,
+        messages,
+        tools,
+        system_prompt,
+        apply_claude_correction,
+    )

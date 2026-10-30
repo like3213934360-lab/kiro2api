@@ -85,6 +85,13 @@ Preserve:
 - files/paths, symbols, commands, error messages and identifiers;
 - what has been completed, what failed, and what is still pending.
 
+Also keep an explicit "already verified" checklist, because the next turn must
+not repeat work:
+- every command that was run and its outcome (exit code, pass/fail, test counts);
+- every fact confirmed by reading code, docs or the device;
+- the current state of the working tree (files changed, created, deleted,
+  staged, uncommitted).
+
 Omit:
 - raw tool output, repeated file contents and chit-chat;
 - anything that is no longer needed to continue the task.
