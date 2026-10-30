@@ -68,8 +68,8 @@ HARD_CAP_TAIL = 60_000
 # `git status` alone ran 20 times because the changed-file list was capped at 10.
 MAX_DIFF_HUNK_LINES = 200
 MAX_GIT_LOG_LINES = 200
-GREP_PER_FILE_MAX = 30
-MAX_GREP_LINES = 400
+GREP_PER_FILE_MAX = 100
+MAX_GREP_LINES = 1000
 MAX_LISTING_LINES = 200
 MAX_TREE_LINES = 200
 MAX_LOG_LINES = 400
@@ -339,6 +339,11 @@ def _looks_like_grep(text: str) -> bool:
     if len(lines) < 20:
         return False
     sample = lines[:200]
+
+    # A traceback is a stack, not a file listing: "  File \"/tmp/x.py\", line 51"
+    # satisfies the path:line:content shape. Regrouping it hid the exception text.
+    if "Traceback (most recent call last)" in text:
+        return False
 
     stamped = sum(1 for line in sample if _TIMESTAMP_LINE_RE.match(line))
     if stamped >= max(3, len(sample) // 10):

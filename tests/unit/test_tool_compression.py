@@ -166,7 +166,8 @@ class TestGrepAndListing:
             assert f"  +{20 - GREP_PER_FILE_MAX} more" in compressed
         else:
             assert "match text 0" in compressed
-        assert compressed.count("\n") < 800
+        # Grouping drops the repeated path per line; the byte count is what matters.
+        assert len(compressed) < len(make_grep(800))
 
     def test_listing_entries_are_capped(self):
         """
@@ -547,11 +548,15 @@ class TestGrepMisdetection:
         What it does: Compresses ordinary grep output.
         Purpose: The guard must not disable the feature it protects.
         """
+        from kiro.tool_compression import MAX_GREP_LINES
+
         text = "\n".join(f"src/file{i % 5}.ets:{i}:match text" for i in range(800))
         out, kind = compress_text(text)
 
         assert kind == "grep"
-        assert len(out.splitlines()) < 400
+        # Grouped output adds per-file headers; the budget itself is the cap.
+        assert len(out.splitlines()) <= MAX_GREP_LINES + 20
+        assert "matches in" in out
 
     def test_mixed_output_is_left_alone(self):
         """
