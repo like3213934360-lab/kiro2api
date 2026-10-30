@@ -50,6 +50,7 @@ from kiro.config import (
     model_max_input_tokens,
 )
 from kiro.payload_guards import check_payload_size, trim_payload_to_limit
+from kiro.tool_compression import compress_tool_outputs
 
 
 # ==================================================================================================
@@ -1888,6 +1889,11 @@ def build_kiro_payload(
     # level from the model suffix, output_config.effort or thinking budget.
     if effort:
         payload["additionalModelRequestFields"] = build_effort_fields(model_id, effort)
+
+    # Deterministic tool-output compression. Runs on every turn but is a pure
+    # function of each message's content, so bytes stay identical across turns
+    # and Kiro's prefix cache keeps hitting.
+    compress_tool_outputs(payload)
 
     # Automatic context pruning: old tool outputs are shortened once the
     # conversation gets large, keeping the recent turns intact and valid.
