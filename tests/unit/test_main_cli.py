@@ -407,3 +407,59 @@ class TestCliVersion:
         print(f"APP_VERSION: {APP_VERSION}")
         
         assert APP_VERSION in captured.out
+
+class TestReusePortSocket:
+    """
+    The listening socket used for zero-downtime restarts.
+
+    A replacement process must be able to bind the same port while the current
+    one is still serving; otherwise every restart drops in-flight requests.
+    """
+
+    def test_two_sockets_can_share_one_port(self):
+        """
+        What it does: Binds two listening sockets on the same port.
+        Purpose: This is the property the seamless swap depends on.
+        """
+        import main
+
+        first = main.make_reuse_port_socket("127.0.0.1", 0)
+        port = first.getsockname()[1]
+        second = main.make_reuse_port_socket("127.0.0.1", port)
+        try:
+            assert second.getsockname()[1] == port
+        finally:
+            first.close()
+            second.close()
+
+    def test_socket_is_non_blocking(self):
+        """
+        What it does: Checks the socket flags uvicorn expects.
+        Purpose: A blocking accept would stall the event loop.
+        """
+        import main
+
+        sock = main.make_reuse_port_socket("127.0.0.1", 0)
+        try:
+            assert sock.getblocking() is False
+        finally:
+            sock.close()
+
+    def test_port_is_released_after_close(self):
+        """
+        What it does: Closes both sockets and rebinds the port.
+        Purpose: A failed swap must not leave the port unusable.
+        """
+        import main
+
+        first = main.make_reuse_port_socket("127.0.0.1", 0)
+        port = first.getsockname()[1]
+        second = main.make_reuse_port_socket("127.0.0.1", port)
+        first.close()
+        second.close()
+
+        again = main.make_reuse_port_socket("127.0.0.1", port)
+        try:
+            assert again.getsockname()[1] == port
+        finally:
+            again.close()

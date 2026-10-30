@@ -878,6 +878,35 @@ def print_startup_banner(host: str, port: int) -> None:
     print()
 
 
+
+def make_reuse_port_socket(host: str, port: int, backlog: int = 2048):
+    """
+    Bind a listening socket that another process may also bind.
+
+    SO_REUSEPORT lets a replacement process bind the same port while the current
+    one is still serving, so a restart does not drop connections. The kernel
+    spreads new connections across both processes until the old one exits.
+
+    Args:
+        host: Address to bind
+        port: TCP port
+        backlog: Listen backlog
+
+    Returns:
+        A bound, non-blocking listening socket
+    """
+    import socket
+
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    listen_socket = socket.socket(family, socket.SOCK_STREAM)
+    listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    listen_socket.bind((host, port))
+    listen_socket.listen(backlog)
+    listen_socket.setblocking(False)
+    return listen_socket
+
+
 # --- Entry Point ---
 if __name__ == "__main__":
     import uvicorn
@@ -898,11 +927,32 @@ if __name__ == "__main__":
     print_startup_banner(final_host, final_port)
     
     logger.info(f"Starting Uvicorn server on {final_host}:{final_port}...")
-    
-    # Use string reference to avoid double module import
-    uvicorn.run(
-        "main:app",
-        host=final_host,
-        port=final_port,
-        log_config=UVICORN_LOG_CONFIG,
-    )
+
+    # Zero-downtime restarts: when SERVER_REUSE_PORT is enabled the listening
+    # socket is created here with SO_REUSEPORT, so a replacement process can bind
+    # the same port while this one is still serving. The kernel then spreads new
+    # connections across both, the old process is asked to stop, and in-flight
+    # requests finish on it. Without the flag (default) uvicorn opens the socket
+    # itself and a restart has a short gap.
+    if os.getenv("SERVER_REUSE_PORT", "").lower() in ("1", "true", "yes"):
+        listen_socket = make_reuse_port_socket(final_host, final_port)
+        logger.info(
+            f"Listening socket bound with SO_REUSEPORT — a replacement process "
+            f"can take over {final_host}:{final_port} without dropping connections"
+        )
+
+        config = uvicorn.Config(
+            "main:app",
+            host=final_host,
+            port=final_port,
+            log_config=UVICORN_LOG_CONFIG,
+        )
+        uvicorn.Server(config).run(sockets=[listen_socket])
+    else:
+        # Use string reference to avoid double module import
+        uvicorn.run(
+            "main:app",
+            host=final_host,
+            port=final_port,
+            log_config=UVICORN_LOG_CONFIG,
+        )

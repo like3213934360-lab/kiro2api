@@ -45,7 +45,7 @@ if curl -s -m 2 http://127.0.0.1:8000/ >/dev/null 2>&1; then
   exit 0
 fi
 
-nohup .venv/bin/python main.py > server.log 2>&1 &
+SERVER_REUSE_PORT=1 nohup .venv/bin/python main.py > server.log 2>&1 &
 echo $! > "$PID_FILE"
 if wait_for_server; then
   echo "已启动，PID=$(cat "$PID_FILE")"
