@@ -93,6 +93,11 @@ MARKER = "\n[...kiro-gateway: output shortened automatically; re-run the tool fo
 DEDUPE_MARKER = "[kiro-gateway: identical to an earlier tool output; omitted]"
 
 _GREP_LINE_RE = re.compile(r"^([^:\n]+):(\d+):(.*)$")
+# A line that opens with a date or a clock time is log output, never a grep hit.
+_TIMESTAMP_LINE_RE = re.compile(
+    r"^\s*\[?\d{2,4}[-/.]\d{1,2}[-/.]\d{1,2}"
+    r"|^\s*\[?\d{1,2}:\d{2}:\d{2}"
+)
 _TREE_CHARS = ("├", "└", "│", "|--", "`--")
 _LOG_HINT_RE = re.compile(
     r"^\s*(\[?\d{2}:\d{2}:\d{2}|\[?\d{4}-\d{2}-\d{2}|INFO|WARN|ERROR|DEBUG|TRACE|"
@@ -280,16 +285,22 @@ def _looks_like_diff(text: str) -> bool:
 
 
 def _looks_like_git_status(text: str) -> bool:
-    """True for long-form or porcelain ``git status`` output."""
+    """
+    True for long-form or porcelain ``git status`` output.
+
+    A single "On branch" line is not enough: source files and docs quote it, and
+    treating such a file as status output rewrote 300 lines of code into two
+    lines of section counts, forcing the model to read the file again.
+    """
     head = text[:4000]
-    if "On branch " in head:
+    lines = head.splitlines()
+    prefixed = sum(1 for line in lines if line.strip().startswith(_STATUS_FILE_PREFIXES))
+    if prefixed >= 3:
         return True
     if "Changes to be committed" in head or "Changes not staged for commit" in head:
         return True
-    if "Untracked files:" in head or "nothing to commit" in head:
-        return True
-    prefixed = sum(1 for line in head.splitlines() if line.strip().startswith(_STATUS_FILE_PREFIXES))
-    return prefixed >= 3
+    has_branch = any(line.startswith("On branch ") for line in lines)
+    return has_branch and ("Untracked files:" in head or "nothing to commit" in head)
 
 
 def _looks_like_git_log(text: str) -> bool:
@@ -300,28 +311,65 @@ def _looks_like_git_log(text: str) -> bool:
 
 
 def _looks_like_tree(text: str) -> bool:
-    """True for ``tree``/directory diagrams."""
-    head = text[:4000]
-    return any(marker in head for marker in _TREE_CHARS)
+    """
+    True for ``tree``/directory diagrams.
+
+    Directory trees mark almost every line; a source file may contain one or two
+    box-drawing characters in a comment. Requiring most lines to be marked keeps
+    such a file from being capped as if it were a listing.
+    """
+    lines = [line for line in text[:4000].splitlines() if line.strip()]
+    if len(lines) < 5:
+        return False
+    marked = sum(1 for line in lines if any(marker in line for marker in _TREE_CHARS))
+    return marked >= 5 and marked >= len(lines) * 0.5
 
 
 def _looks_like_grep(text: str) -> bool:
-    """True when most lines look like ``path:line:content``."""
+    """
+    True when most lines look like ``path:line:content``.
+
+    Timestamps satisfy the same shape (``2026-10-31 12:34:56 [ERROR] ...`` parses
+    as path ``2026-10-31 12``, line ``34``, content ``56 [ERROR] ...``), so a
+    build log would be treated as grep output, regrouped by hour and truncated —
+    dropping the actual error line. Lines that start with a date or clock time
+    therefore disqualify the text from being grep output.
+    """
     lines = text.splitlines()
     if len(lines) < 20:
         return False
     sample = lines[:200]
+
+    stamped = sum(1 for line in sample if _TIMESTAMP_LINE_RE.match(line))
+    if stamped >= max(3, len(sample) // 10):
+        return False
+
     hits = sum(1 for line in sample if _GREP_LINE_RE.match(line))
     return hits >= min(len(sample), 20) * 0.8
 
 
 def _looks_like_listing(text: str) -> bool:
-    """True when most lines look like file paths (no spaces, contains a slash)."""
+    """
+    True when most lines look like file paths.
+
+    Code is excluded explicitly: a minified bundle or a block of imports also has
+    space-free lines containing slashes, but it is a file read and must not be
+    capped as though it were a directory listing.
+    """
     lines = [line for line in text.splitlines() if line.strip()]
     if len(lines) < 40:
         return False
     sample = lines[:200]
-    hits = sum(1 for line in sample if "/" in line and " " not in line.strip())
+
+    def _is_path(line: str) -> bool:
+        stripped = line.strip()
+        return (
+            "/" in stripped
+            and " " not in stripped
+            and not any(mark in stripped for mark in ("{", "}", "(", ")", "=", ";", "->", "=>"))
+        )
+
+    hits = sum(1 for line in sample if _is_path(line))
     return hits >= len(sample) * 0.8
 
 
@@ -508,10 +556,20 @@ def _compress_grep(text: str) -> str:
 
     Mirrors RTK's ``grep`` filter: a header with the match count, then up to
     ``GREP_PER_FILE_MAX`` hits per file and a ``+N`` marker for the rest.
+
+    The rewrite only happens when the text is almost entirely hits. A mixed
+    output (hits plus prose, a table or a stack trace) cannot be regrouped
+    without dropping the unmatched lines, and dropping content is worse than a
+    large prompt: the model re-runs the command to see what was removed.
     """
+    lines = text.splitlines()
+    matched_lines = sum(1 for line in lines if _GREP_LINE_RE.match(line))
+    if matched_lines < len(lines) * 0.8:
+        return text
+
     by_file: Dict[str, List[Tuple[str, str]]] = {}
     total = 0
-    for line in text.splitlines():
+    for line in lines:
         match = _GREP_LINE_RE.match(line)
         if not match:
             continue

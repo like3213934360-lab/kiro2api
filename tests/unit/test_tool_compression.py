@@ -497,3 +497,146 @@ class TestLogKeepsFailures:
 
         assert "error/failure" not in compressed
         assert "lines omitted" in compressed
+
+
+class TestGrepMisdetection:
+    """
+    Timestamped logs must never be parsed as grep output.
+
+    "2026-10-31 12:34:56 [ERROR] ..." also fits the path:line:content shape, so
+    the log was regrouped by hour and truncated — and the error line, the one
+    thing the model needed, was dropped. That sends the agent back to re-run a
+    40-second build.
+    """
+
+    @staticmethod
+    def _build_log(lines: int = 300) -> str:
+        body = [
+            f"2026-10-31 12:30:{i % 60:02d}.123 [INFO] hvigor task {i} done"
+            for i in range(lines)
+        ]
+        body.append("2026-10-31 12:35:00.000 [ERROR] StarShell.ets:42 undefined symbol cameraDegree")
+        return "\n".join(body)
+
+    def test_date_prefixed_log_is_not_grep(self):
+        """
+        What it does: Compresses a date-prefixed build log.
+        Purpose: It must stay intact, including the final error.
+        """
+        log = self._build_log()
+        out, kind = compress_text(log)
+
+        print(f"kind={kind}")
+        assert kind != "grep"
+        assert "undefined symbol cameraDegree" in out
+        assert len(out.splitlines()) == len(log.splitlines())
+
+    def test_clock_prefixed_log_is_not_grep(self):
+        """
+        What it does: Compresses a log that starts each line with HH:MM:SS.
+        Purpose: The clock-time variant is the same trap.
+        """
+        log = "\n".join(f"12:30:{i % 60:02d} build step {i}" for i in range(120))
+        out, kind = compress_text(log)
+
+        assert kind != "grep"
+        assert out == log
+
+    def test_real_grep_is_still_compressed(self):
+        """
+        What it does: Compresses ordinary grep output.
+        Purpose: The guard must not disable the feature it protects.
+        """
+        text = "\n".join(f"src/file{i % 5}.ets:{i}:match text" for i in range(800))
+        out, kind = compress_text(text)
+
+        assert kind == "grep"
+        assert len(out.splitlines()) < 400
+
+    def test_mixed_output_is_left_alone(self):
+        """
+        What it does: Compresses output that is 60% hits and 40% prose.
+        Purpose: Regrouping would silently drop the prose; a large prompt is the
+                 cheaper failure.
+        """
+        hits = "\n".join(f"src/a.ets:{i}:match" for i in range(60))
+        prose = "\n".join(f"note line {i}" for i in range(40))
+        text = hits + "\n" + prose
+
+        out, kind = compress_text(text)
+
+        # Either the detector rejects it (kind None) or the compressor returns it
+        # untouched; what matters is that no line is dropped.
+        assert kind in (None, "grep")
+        assert out == text, "mixed output must come back unchanged"
+
+
+class TestFormatMisdetection:
+    """
+    Weak format signals must not turn a file read into a "compressed" summary.
+
+    Every one of these strings appears in ordinary code and docs. Matching on a
+    single occurrence rewrote hundreds of lines of source into a couple of lines
+    of counts, which forces the model to read the whole file again.
+    """
+
+    def test_source_quoting_on_branch_is_untouched(self):
+        """
+        What it does: Compresses source whose header mentions "On branch main".
+        Purpose: A single branch line is not a git status report.
+        """
+        src = "// On branch main the router restarts\n" + "\n".join(
+            f"const v{i} = compute({i});" for i in range(300)
+        )
+        out, kind = compress_text(src)
+
+        assert kind != "git_status"
+        assert out == src
+
+    def test_source_with_box_drawing_is_untouched(self):
+        """
+        What it does: Compresses source with one "├" comment every ten lines.
+        Purpose: A tree diagram marks nearly every line; a comment does not.
+        """
+        src = "\n".join(("// ├─ step" if i % 10 == 0 else f"const v{i} = {i};") for i in range(400))
+        out, kind = compress_text(src)
+
+        assert kind != "tree"
+        assert out == src
+
+    def test_import_block_is_not_a_listing(self):
+        """
+        What it does: Compresses 80 import lines with quoted paths.
+        Purpose: Space-free path-like lines are not a directory listing.
+        """
+        src = "\n".join(f'import {{m{i}}} from "./mod{i}"' for i in range(80))
+        out, kind = compress_text(src)
+
+        assert kind != "listing"
+        assert out == src
+
+    def test_real_git_status_is_still_detected(self):
+        """
+        What it does: Compresses a genuine status report.
+        Purpose: The stricter detection must keep working on the real format.
+        """
+        text = (
+            "On branch main\n\nChanges not staged for commit:\n"
+            + "\n".join(f"\tmodified:   src/f{i}.py" for i in range(40))
+            + "\n\nUntracked files:\n\tnew.txt"
+        )
+        out, kind = compress_text(text)
+
+        assert kind == "git_status"
+        assert "Modified: 40 file(s)" in out
+
+    def test_real_tree_is_still_detected(self):
+        """
+        What it does: Compresses a genuine tree listing.
+        Purpose: Real trees are mostly markers and must still be capped.
+        """
+        text = "src\n" + "\n".join(f"├── file{i}.ets" for i in range(300))
+        out, kind = compress_text(text)
+
+        assert kind == "tree"
+        assert len(out.splitlines()) < 300
