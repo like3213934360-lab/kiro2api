@@ -34,6 +34,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Deque, Dict, Optional
 
+from kiro.utils import atomic_write_text
+
 # Output tokens cost about this many input tokens on Kiro (measured: 6.9e-5
 # credits/input token vs 4.9e-4 credits/output token on claude-opus-5.5).
 OUTPUT_TOKEN_WEIGHT = 7.0
@@ -303,9 +305,9 @@ class CacheMeter:
             for model, value in self._peaks.items():
                 merged[model] = max(value, merged.get(model, 0.0))
             self._peaks.update(merged)
-            path.write_text(
+            atomic_write_text(
+                path,
                 json.dumps({"peaks": merged}, indent=2, ensure_ascii=False),
-                encoding="utf-8",
             )
         except OSError:
             return

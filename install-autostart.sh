@@ -41,6 +41,8 @@ cat > "$PLIST" <<EOF
     <string>$PROJECT_DIR/server.log</string>
     <key>EnvironmentVariables</key>
     <dict>
+        <key>SERVER_REUSE_PORT</key>
+        <string>1</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>

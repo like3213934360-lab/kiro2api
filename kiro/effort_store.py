@@ -23,6 +23,8 @@ from typing import Dict, Optional
 
 from loguru import logger
 
+from kiro.utils import atomic_write_text
+
 from kiro.config import MODEL_EFFORT_DEFAULTS
 
 
@@ -64,12 +66,10 @@ def _load_locked() -> None:
 def _save_locked() -> None:
     try:
         _DEFAULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _DEFAULTS_FILE.with_suffix(".json.tmp")
-        tmp.write_text(
+        atomic_write_text(
+            _DEFAULTS_FILE,
             json.dumps(_overrides, ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
         )
-        os.replace(tmp, _DEFAULTS_FILE)
     except Exception as exc:
         logger.warning(f"Failed to save effort overrides: {exc}")
 

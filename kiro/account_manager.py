@@ -61,7 +61,7 @@ from kiro.config import (
     STATE_SAVE_INTERVAL_SECONDS,
     FALLBACK_MODELS,
 )
-from kiro.utils import get_kiro_headers
+from kiro.utils import atomic_write_text, get_kiro_headers
 from kiro.account_errors import ErrorType
 from kiro.http_client import KiroHttpClient
 
@@ -441,20 +441,18 @@ class AccountManager:
         }
         
         state_path = Path(self._state_file)
-        tmp_path = state_path.with_suffix('.json.tmp')
-        
+
         try:
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                json.dump(state_data, f, indent=2, ensure_ascii=False)
-            
-            # Atomic rename
-            tmp_path.replace(state_path)
+            # Unique temp file per write: during a zero-downtime restart the
+            # replacement process may save at the same time as this one.
+            atomic_write_text(
+                state_path,
+                json.dumps(state_data, indent=2, ensure_ascii=False),
+            )
             logger.debug("State saved successfully")
-        
+
         except Exception as e:
             logger.error(f"Failed to save state: {e}")
-            if tmp_path.exists():
-                tmp_path.unlink()
     
     async def save_state_periodically(self) -> None:
         """

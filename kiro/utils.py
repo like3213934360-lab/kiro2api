@@ -484,3 +484,42 @@ def generate_tool_call_id() -> str:
         ID in format "call_{uuid_hex[:8]}"
     """
     return f"call_{uuid.uuid4().hex[:8]}"
+
+def atomic_write_text(path: Any, text: str) -> None:
+    """
+    Write a file so readers only ever see the old or the new content.
+
+    Two processes can be alive at the same time during a zero-downtime restart,
+    and all of them persist state (account counters, learned cache prices, effort
+    overrides) from a background task. A fixed temp name let them interleave into
+    the same temporary file and rename a half-written document over the real one;
+    a unique temp file per write makes that impossible.
+
+    Args:
+        path: Destination file
+        text: Content to write
+
+    Raises:
+        OSError: When the destination cannot be written
+    """
+    import os
+    import tempfile
+    from pathlib import Path as _Path
+
+    target = _Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f"{target.name}.", suffix=".tmp", dir=str(target.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, target)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise

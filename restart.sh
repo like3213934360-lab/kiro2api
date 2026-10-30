@@ -25,7 +25,7 @@ wait_health() {
 
 wait_gone() {
   local pid=$1 i
-  for i in $(seq 1 300); do
+  for i in $(seq 1 450); do
     kill -0 "$pid" 2>/dev/null || return 0
     sleep 0.1
   done
@@ -92,6 +92,9 @@ if ! wait_health; then
 fi
 
 echo "新实例 PID=${NEW_PID} 已在监听，等待旧实例处理完在途请求..."
+# Give the kernel a moment to hand pending connections to the new process before
+# the old listening socket goes away.
+sleep 1
 kill -TERM "$OLD_PID" 2>/dev/null || true
 if wait_gone "$OLD_PID"; then
   echo "旧实例 PID=${OLD_PID} 已优雅退出"

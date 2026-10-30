@@ -946,6 +946,10 @@ if __name__ == "__main__":
             host=final_host,
             port=final_port,
             log_config=UVICORN_LOG_CONFIG,
+            # Without a deadline uvicorn waits for every connection forever, so a
+            # drained process had to be SIGKILLed after the 30s the restart script
+            # allows. 15s is longer than any in-flight request needs.
+            timeout_graceful_shutdown=15,
         )
         uvicorn.Server(config).run(sockets=[listen_socket])
     else:
