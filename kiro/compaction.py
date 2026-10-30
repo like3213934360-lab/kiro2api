@@ -120,6 +120,31 @@ def _cache_set(key: str, summary: str) -> None:
     _CACHE[key] = (time.time(), summary)
 
 
+def _summarizer_excerpt(text: str, limit: int) -> str:
+    """
+    Shorten text for the summarizer while keeping its conclusion.
+
+    The summarizer is asked to record command outcomes and exit codes, which sit
+    at the end of a tool result. A head-only excerpt therefore removes exactly
+    the information the summary is supposed to preserve, and the next turn has no
+    record that the check already passed.
+
+    Args:
+        text: Original text
+        limit: Maximum characters to keep
+
+    Returns:
+        The original text when short, otherwise its start and end joined by a gap
+        marker
+    """
+    if len(text) <= limit:
+        return text
+    head = max(1, int(limit * 2 / 3))
+    tail = max(1, limit - head)
+    omitted = len(text) - head - tail
+    return f"{text[:head]}\n[... {omitted} chars omitted ...]\n{text[-tail:]}"
+
+
 def _render_transcript(messages: List[Any], tool_result_max_chars: int = 1500) -> str:
     """Render Anthropic messages as a plain transcript for the summarizer."""
     parts: List[str] = []
@@ -134,12 +159,17 @@ def _render_transcript(messages: List[Any], tool_result_max_chars: int = 1500) -
             function = call.get("function", {})
             name = function.get("name", "tool")
             arguments = function.get("arguments", {})
-            parts.append(f"ASSISTANT TOOL CALL {name}:\n{str(arguments)[:800]}")
+            parts.append(
+                f"ASSISTANT TOOL CALL {name}:\n{_summarizer_excerpt(str(arguments), 800)}"
+            )
 
         for result in extract_tool_results_from_anthropic_content(content):
-            result_text = str(result.get("content", ""))[:tool_result_max_chars]
+            result_text = _summarizer_excerpt(
+                str(result.get("content", "")), tool_result_max_chars
+            )
+            status = " [FAILED]" if result.get("is_error") else ""
             parts.append(
-                f"TOOL RESULT {result.get('tool_use_id', '')}:\n{result_text}"
+                f"TOOL RESULT {result.get('tool_use_id', '')}{status}:\n{result_text}"
             )
 
     return "\n\n".join(parts)

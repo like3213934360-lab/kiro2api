@@ -219,3 +219,55 @@ class TestSummaryInstructions:
         from kiro.compaction import _SUMMARY_INSTRUCTION
 
         assert len(_SUMMARY_INSTRUCTION) < 3000
+
+
+class TestSummarizerTranscript:
+    """
+    The summarizer must see the same verdicts the model saw.
+
+    It is asked to record command outcomes, so a head-only excerpt of each tool
+    result removes exactly that: exit codes and failure summaries live at the end.
+    """
+
+    def test_excerpt_keeps_the_end_of_a_result(self):
+        """
+        What it does: Shortens a long tool result.
+        Purpose: "exit=1" must survive into the summary prompt.
+        """
+        from kiro.compaction import _summarizer_excerpt
+
+        text = "grep output\n" + ("match\n" * 2000) + "exit=1"
+        excerpt = _summarizer_excerpt(text, 1500)
+
+        assert excerpt.startswith("grep output")
+        assert excerpt.endswith("exit=1")
+        assert len(excerpt) <= 1600
+
+    def test_short_text_is_unchanged(self):
+        """
+        What it does: Passes text below the limit.
+        Purpose: Small results must reach the summarizer verbatim.
+        """
+        from kiro.compaction import _summarizer_excerpt
+
+        assert _summarizer_excerpt("ok", 1500) == "ok"
+
+    def test_failed_results_are_labelled(self):
+        """
+        What it does: Renders a transcript containing an error result.
+        Purpose: The summarizer must be able to write "this command failed" into
+                 the handoff checklist instead of guessing from text.
+        """
+        from types import SimpleNamespace
+
+        from kiro.compaction import _render_transcript
+
+        message = SimpleNamespace(role="user", content=[{
+            "type": "tool_result", "tool_use_id": "call_1",
+            "content": "build failed", "is_error": True,
+        }])
+
+        transcript = _render_transcript([message])
+
+        assert "[FAILED]" in transcript
+        assert "build failed" in transcript
