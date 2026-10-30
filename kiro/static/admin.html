@@ -662,8 +662,7 @@ function renderLogs() {
         detail('思考等级', l.effort) +
         detail('停止原因', l.stop_reason) +
         detail('工具调用', l.tool_calls) +
-        detail('缓存读', l.cache_read_tokens) +
-        detail('缓存写', l.cache_creation_tokens) +
+        detail('缓存', l.cache_hit === 'hit' ? '命中' : l.cache_hit === 'partial' ? '部分命中' : l.cache_hit === 'miss' ? '未命中' : '—') +
         detail('总 tokens', l.total_tokens) +
         detail('User-Agent', l.user_agent) +
         detail('错误', l.error) +

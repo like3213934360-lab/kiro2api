@@ -47,6 +47,7 @@ from kiro.config import (
     FAKE_REASONING_HANDLING,
 )
 from kiro.thinking_parser import ThinkingParser
+from kiro.cache_meter import cache_meter
 
 if TYPE_CHECKING:
     from kiro.cache import ModelInfoCache
@@ -404,13 +405,19 @@ def log_usage_summary(
     total_tokens: int,
     credits_used: Optional[float] = None,
     cache_read_tokens: Optional[int] = None,
-) -> None:
+) -> Optional[str]:
     """
     Logs one usage summary line per request.
 
     Includes input/output token counts, the credit amount Kiro actually charged
     and the model's current rate multiplier, so an unexpectedly high spend can be
     attributed either to token volume or to the model's pricing tier.
+
+    Kiro reports no cache token counters, so the cache verdict is derived from
+    the charge itself: a request billed clearly below the model's learned peak
+    unit price was served from the upstream prefix cache. This is what makes
+    cache regressions (for example a pruning pass that rewrites history) visible
+    in the log.
 
     Args:
         model: Model ID
@@ -420,6 +427,9 @@ def log_usage_summary(
         total_tokens: Total token count
         credits_used: Credits reported by Kiro's metering event, if any
         cache_read_tokens: Cache-read tokens, only when upstream reported them
+
+    Returns:
+        Cache verdict (``hit`` / ``partial`` / ``miss`` / ``unknown``), if any
     """
     parts = [
         f"model={model}",
@@ -432,6 +442,11 @@ def log_usage_summary(
     if multiplier is not None:
         parts.append(f"rate={multiplier:g}" + (f"/{unit}" if unit else ""))
 
+    observation = cache_meter.classify(
+        model, prompt_tokens, completion_tokens, credits_used
+    )
+    parts.append(f"cache={observation.format()}")
+
     if cache_read_tokens is not None:
         parts.append(f"cache_read={cache_read_tokens}")
 
@@ -439,6 +454,7 @@ def log_usage_summary(
         parts.append(f"credits={credits_used:g}")
 
     logger.info("[Usage] " + ", ".join(parts))
+    return observation.label
 
 
 def extract_credits_used(metering_data: Any) -> Optional[float]:

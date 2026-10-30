@@ -472,23 +472,26 @@ async def stream_kiro_to_openai_internal(
         if credits_used is not None:
             final_chunk["usage"]["credits_used"] = credits_used
 
+        # Log final token values being sent to client (cache verdict included)
+        logger.debug(
+            f"[UsageDetail] {model}: prompt_source={prompt_source}, total_source={total_source}"
+        )
+        cache_hit = log_usage_summary(
+            model, model_cache, prompt_tokens, completion_tokens, total_tokens,
+            credits_used=credits_used,
+        )
+
         # Notify usage subscriber (external key quota tracking) before the final chunk
         if on_usage is not None:
             try:
-                result = on_usage(final_chunk["usage"])
+                report = dict(final_chunk["usage"])
+                if cache_hit:
+                    report["cache_hit"] = cache_hit
+                result = on_usage(report)
                 if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
                     await result
             except Exception as e:
                 logger.warning(f"on_usage callback failed: {e}")
-
-        # Log final token values being sent to client
-        logger.debug(
-            f"[UsageDetail] {model}: prompt_source={prompt_source}, total_source={total_source}"
-        )
-        log_usage_summary(
-            model, model_cache, prompt_tokens, completion_tokens, total_tokens,
-            credits_used=credits_used,
-        )
         
         yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"

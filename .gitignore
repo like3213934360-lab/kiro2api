@@ -49,3 +49,6 @@ effort_defaults.json
 
 # Admin session secret (keeps login across restarts)
 admin_session_secret
+
+# Learned per-model cache pricing (runtime state)
+cache_meter.json

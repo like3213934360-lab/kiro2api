@@ -1020,7 +1020,7 @@ async def stream_kiro_to_anthropic(
         usage_payload.update(upstream_cache_usage)
         if credits_used is not None:
             usage_payload["credits_used"] = credits_used
-        log_usage_summary(
+        cache_hit = log_usage_summary(
             model, model_cache, input_tokens, output_tokens, input_tokens + output_tokens,
             credits_used=credits_used,
             cache_read_tokens=upstream_cache_usage.get("cache_read_input_tokens"),
@@ -1036,6 +1036,7 @@ async def stream_kiro_to_anthropic(
                     "credits_used": credits_used,
                     "cache_read_input_tokens": upstream_cache_usage.get("cache_read_input_tokens"),
                     "cache_creation_input_tokens": upstream_cache_usage.get("cache_creation_input_tokens"),
+                    "cache_hit": cache_hit,
                     "stop_reason": stop_reason,
                     "tool_calls": len(tool_blocks),
                 })
@@ -1263,7 +1264,7 @@ async def collect_anthropic_response(
     collected_credits = extract_credits_used(result.usage)
     if collected_credits is not None:
         usage_payload["credits_used"] = collected_credits
-    log_usage_summary(
+    cache_hit = log_usage_summary(
         model, model_cache, input_tokens, output_tokens, input_tokens + output_tokens,
         credits_used=collected_credits,
         cache_read_tokens=upstream_cache_usage.get("cache_read_input_tokens"),
@@ -1279,6 +1280,7 @@ async def collect_anthropic_response(
                 "credits_used": collected_credits,
                 "cache_read_input_tokens": upstream_cache_usage.get("cache_read_input_tokens"),
                 "cache_creation_input_tokens": upstream_cache_usage.get("cache_creation_input_tokens"),
+                "cache_hit": cache_hit,
                 "stop_reason": stop_reason,
                 "tool_calls": len(result.tool_calls),
             })

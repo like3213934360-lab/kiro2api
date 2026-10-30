@@ -1893,3 +1893,23 @@ def reset_auth_throttle():
     yield
     reset_unauthorized_attempts()
 
+
+@pytest.fixture(autouse=True)
+def isolate_cache_meter():
+    """
+    Keep the shared cache meter away from the real state file.
+
+    The meter persists learned per-model prices; tests must never pollute the
+    developer's ``cache_meter.json`` nor inherit prices from earlier tests.
+    """
+    from kiro.cache_meter import cache_meter
+
+    original_path = cache_meter.state_path
+    cache_meter.state_path = None
+    cache_meter.reset()
+    try:
+        yield
+    finally:
+        cache_meter.reset()  # state_path is still None: no write to disk
+        cache_meter.state_path = original_path
+

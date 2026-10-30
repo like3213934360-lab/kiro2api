@@ -584,10 +584,12 @@ async def stream_kiro_to_responses_internal(
             f"cache_usage={'available' if 'input_tokens_details' in usage else 'unavailable'}"
         )
         cache_read_tokens = usage.get("input_tokens_details", {}).get("cached_tokens")
-        log_usage_summary(
+        cache_hit = log_usage_summary(
             model, model_cache, prompt_tokens, completion_tokens, total_tokens,
             credits_used=credits_used, cache_read_tokens=cache_read_tokens,
         )
+        if cache_hit:
+            usage["cache_hit"] = cache_hit
 
         # Notify usage subscriber (external key quota tracking)
         if on_usage is not None:
@@ -816,11 +818,13 @@ async def collect_responses_response(
     if credits_used is not None:
         usage["credits_used"] = credits_used
 
-    log_usage_summary(
+    cache_hit = log_usage_summary(
         model, model_cache, prompt_tokens, completion_tokens, total_tokens,
         credits_used=credits_used,
         cache_read_tokens=usage.get("input_tokens_details", {}).get("cached_tokens"),
     )
+    if cache_hit:
+        usage["cache_hit"] = cache_hit
 
     # Notify usage subscriber (external key quota tracking)
     if on_usage is not None:

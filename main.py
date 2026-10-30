@@ -627,6 +627,7 @@ async def log_api_requests(request, call_next):
             credits=usage.get("credits_used"),
             cache_read_tokens=usage.get("cache_read_input_tokens"),
             cache_creation_tokens=usage.get("cache_creation_input_tokens"),
+            cache_hit=usage.get("cache_hit"),
             stop_reason=usage.get("stop_reason"),
             tool_calls=usage.get("tool_calls"),
             effort=getattr(request.state, "request_log_effort", None),
