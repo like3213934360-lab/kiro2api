@@ -96,7 +96,7 @@ from kiro.routes_responses import router as responses_router
 from kiro.routes_admin import router as admin_router
 from kiro.exceptions import validation_exception_handler
 from kiro.debug_middleware import DebugLoggerMiddleware
-from kiro.request_log import format_perf_line, request_log_store
+from kiro.request_log import format_perf_line, is_first_token_chunk, request_log_store
 
 
 # --- Loguru Configuration ---
@@ -656,7 +656,10 @@ async def log_api_requests(request, call_next):
             first_chunk_at = None
             try:
                 async for chunk in original_iterator:
-                    if first_chunk_at is None:
+                    # TTFT is the first content delta, not the first byte: the
+                    # Anthropic preamble is sent before the model produces
+                    # anything, and timing it made every prompt look fast.
+                    if first_chunk_at is None and is_first_token_chunk(chunk):
                         first_chunk_at = time.perf_counter()
                         entry["ttfb_ms"] = round((first_chunk_at - started) * 1000, 1)
                     yield chunk

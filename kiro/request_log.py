@@ -116,3 +116,35 @@ def format_perf_line(entry: Dict[str, Any]) -> str:
         f"cache={entry.get('cache_hit') or 'unknown'} "
         f"stream={entry.get('stream')}"
     )
+
+
+def is_first_token_chunk(chunk: Any) -> bool:
+    """
+    Tell whether a streamed chunk carries the model's first real output.
+
+    Anthropic clients receive ``message_start`` immediately, before the upstream
+    model has produced anything, so timing "time to first byte" measures the
+    gateway's own preamble — one sample read 50 ms on a 348K-token prompt. TTFT
+    has to be measured at the first content delta instead, or the number used to
+    judge latency is meaningless.
+
+    Args:
+        chunk: One streamed chunk (bytes or str, SSE formatted)
+
+    Returns:
+        True for a chunk that contains assistant text or a tool-call delta
+    """
+    if isinstance(chunk, bytes):
+        text = chunk.decode("utf-8", "ignore")
+    elif isinstance(chunk, str):
+        text = chunk
+    else:
+        return False
+
+    if "content_block_delta" in text:
+        return True
+    if '"delta"' in text:
+        # OpenAI-style: only count it when the delta carries actual content,
+        # not the empty framing chunks sent alongside role/finish_reason.
+        return '"text"' in text or '"content"' in text or '"arguments"' in text
+    return False

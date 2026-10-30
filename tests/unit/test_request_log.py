@@ -129,3 +129,54 @@ class TestFormatPerfLine:
         assert "duration_ms=-" in line
         assert "speed_tps=-" in line
         assert "cache=unknown" in line
+
+
+class TestFirstTokenDetection:
+    """TTFT must be measured at the first content delta, not the first byte."""
+
+    def test_anthropic_preamble_is_not_a_token(self):
+        """
+        What it does: Checks message_start and content_block_start chunks.
+        Purpose: They are emitted before the model produces anything; timing them
+                 made a 348K-token turn look like 50 ms.
+        """
+        from kiro.request_log import is_first_token_chunk
+
+        preamble = 'event: message_start\ndata: {"type":"message_start"}\n\n'
+        block_start = 'event: content_block_start\ndata: {"type":"content_block_start"}\n\n'
+
+        assert is_first_token_chunk(preamble) is False
+        assert is_first_token_chunk(block_start) is False
+
+    def test_anthropic_text_delta_is_a_token(self):
+        """
+        What it does: Checks a text delta.
+        Purpose: This is the moment the model actually answered.
+        """
+        from kiro.request_log import is_first_token_chunk
+
+        delta = 'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"text":"hi"}}\n\n'
+        assert is_first_token_chunk(delta) is True
+        assert is_first_token_chunk(delta.encode()) is True
+
+    def test_openai_empty_delta_is_not_a_token(self):
+        """
+        What it does: Checks the OpenAI role-only delta.
+        Purpose: The framing chunk carries no content and must not stop the clock.
+        """
+        from kiro.request_log import is_first_token_chunk
+
+        framing = 'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'
+        content = 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+
+        assert is_first_token_chunk(framing) is False
+        assert is_first_token_chunk(content) is True
+
+    def test_keepalive_comment_is_not_a_token(self):
+        """
+        What it does: Checks an SSE keepalive comment.
+        Purpose: Keepalives exist to hold the connection open, not to signal output.
+        """
+        from kiro.request_log import is_first_token_chunk
+
+        assert is_first_token_chunk(": keepalive\n\n") is False
