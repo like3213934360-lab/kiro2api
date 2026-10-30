@@ -1438,7 +1438,9 @@ class TestStreamingAnthropicContextUsage:
         
         with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
             with patch('kiro.streaming_anthropic.parse_bracket_tool_calls', return_value=[]):
-                with patch('kiro.streaming_anthropic.estimate_request_tokens', return_value={"total_tokens": 10}) as mock_estimate:
+                with patch('kiro.streaming_anthropic.get_client_prompt_tokens', return_value=None):
+                  with patch('kiro.streaming_anthropic.estimate_request_tokens_async',
+                             return_value={"total_tokens": 10}) as mock_estimate:
                     async for event in stream_kiro_to_anthropic(
                         mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager,
                         request_messages=request_messages
@@ -1472,7 +1474,9 @@ class TestStreamingAnthropicContextUsage:
 
         with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
             with patch('kiro.streaming_anthropic.parse_bracket_tool_calls', return_value=[]):
-                with patch('kiro.streaming_anthropic.estimate_request_tokens', return_value={"total_tokens": 12}) as mock_estimate:
+                with patch('kiro.streaming_anthropic.get_client_prompt_tokens', return_value=None):
+                  with patch('kiro.streaming_anthropic.estimate_request_tokens_async',
+                             return_value={"total_tokens": 12}) as mock_estimate:
                     events = []
                     async for event in stream_kiro_to_anthropic(
                         mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager,
@@ -1504,7 +1508,8 @@ class TestStreamingAnthropicContextUsage:
         events = []
         with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
             with patch('kiro.streaming_anthropic.parse_bracket_tool_calls', return_value=[]):
-                with patch('kiro.streaming_anthropic.estimate_request_tokens', return_value={"total_tokens": 99}):
+              with patch('kiro.streaming_anthropic.get_client_prompt_tokens', return_value=None):
+                with patch('kiro.streaming_anthropic.estimate_request_tokens_async', return_value={"total_tokens": 99}):
                     async for event in stream_kiro_to_anthropic(
                         mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager,
                         request_messages=[{"role": "user", "content": "hi"}]
@@ -2245,3 +2250,32 @@ class TestCacheUsageSplit:
         )
 
         assert "cache_read_input_tokens" not in usage
+
+
+class TestPrecomputedTokenReuse:
+    """The route's measurement is reused instead of tokenising twice."""
+
+    @pytest.mark.asyncio
+    async def test_uses_the_route_measurement(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Sets a client prompt size and streams a turn.
+        Purpose: Counting a 300K-token history twice per request cost ~120ms of
+                 CPU and the second pass ran on the event loop.
+        """
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hello")
+
+        events = []
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_anthropic.parse_bracket_tool_calls', return_value=[]):
+                with patch('kiro.streaming_anthropic.get_client_prompt_tokens', return_value=321_000):
+                    with patch('kiro.streaming_anthropic.estimate_request_tokens_async') as counter:
+                        async for event in stream_kiro_to_anthropic(
+                            mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager,
+                            request_messages=[{"role": "user", "content": "hi"}],
+                        ):
+                            events.append(event)
+                        counter.assert_not_called()
+
+        start = next(e for e in events if "event: message_start" in e)
+        assert '"input_tokens": 321000' in start

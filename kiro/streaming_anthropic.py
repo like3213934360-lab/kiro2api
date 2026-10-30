@@ -64,7 +64,8 @@ from kiro.streaming_core import (
     with_keepalive,
     effective_prompt_tokens,
 )
-from kiro.tokenizer import count_tokens, estimate_request_tokens
+from kiro.tokenizer import count_tokens, estimate_request_tokens, estimate_request_tokens_async
+from kiro.request_context import get_client_prompt_tokens
 from kiro.cache_meter import estimate_cached_prompt_tokens
 from kiro.parsers import parse_bracket_tool_calls, deduplicate_tool_calls
 from kiro.config import (
@@ -215,9 +216,14 @@ async def stream_kiro_to_anthropic(
     # Accuracy: ~85-90% (acceptable trade-off for maintaining streaming capability).
     # See: https://docs.anthropic.com/en/api/messages-streaming
     
-    # Fallback estimation must cover messages/tools/system to avoid significant undercount
-    if request_messages or request_tools or request_system:
-        request_token_stats = estimate_request_tokens(
+    # Fallback estimation must cover messages/tools/system to avoid significant undercount.
+    # The route already measured the client's conversation; reusing that number
+    # avoids tokenising a 300K-token history a second time on the event loop.
+    precomputed_tokens = get_client_prompt_tokens()
+    if precomputed_tokens:
+        input_tokens = precomputed_tokens
+    elif request_messages or request_tools or request_system:
+        request_token_stats = await estimate_request_tokens_async(
             messages=request_messages or [],
             tools=request_tools,
             system_prompt=request_system,
@@ -1167,10 +1173,14 @@ async def collect_anthropic_response(
     """
     message_id = generate_message_id()
     
-    # Non-streaming uses the same full-request estimation as streaming
+    # Non-streaming uses the same full-request estimation as streaming, and
+    # reuses the route's measurement when it is available.
     input_tokens = 0
-    if request_messages or request_tools or request_system:
-        request_token_stats = estimate_request_tokens(
+    precomputed_tokens = get_client_prompt_tokens()
+    if precomputed_tokens:
+        input_tokens = precomputed_tokens
+    elif request_messages or request_tools or request_system:
+        request_token_stats = await estimate_request_tokens_async(
             messages=request_messages or [],
             tools=request_tools,
             system_prompt=request_system,
