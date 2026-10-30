@@ -213,7 +213,8 @@ class TestPersistence:
         """
         state = tmp_path / "cache_meter.json"
         meter = CacheMeter(min_samples=1, state_path=state)
-        meter.classify("m", 40_000, 10, 5.0)
+        meter.classify("m", 40_000, 10, 0.25)
+        meter.classify("m", 40_000, 10, 5.0)  # 1.25e-4, above the seed
         meter.classify("m", 40_000, 10, 1.0)
         meter.classify("m", 40_000, 10, 2.0)
 
@@ -289,3 +290,36 @@ class TestValidation:
         """Hit threshold above partial threshold is meaningless."""
         with pytest.raises(ValueError):
             CacheMeter(hit_ratio=0.9, partial_ratio=0.5, state_path=None)
+
+
+class TestPeakMerging:
+    """Persisted prices must never be erased by a process that saw less."""
+
+    def test_saving_keeps_a_higher_price_from_disk(self, tmp_path):
+        """
+        What it does: Seeds a high price, then lets a meter learn a lower one.
+        Purpose: A warm-only session would otherwise overwrite the real
+                 uncached baseline with a hit price and mislabel every request.
+        """
+        state = tmp_path / "cache_meter.json"
+        state.write_text(json.dumps({"peaks": {"m": 6.3e-05}}))
+
+        meter = CacheMeter(min_samples=1, state_path=state)
+        meter.classify("m", 40_000, 10, 0.25)  # cheap sample
+        meter.classify("m", 40_000, 10, 2.0)   # 5e-5, still below the seed
+
+        assert json.loads(state.read_text())["peaks"]["m"] == pytest.approx(6.3e-05)
+
+    def test_saving_raises_a_lower_price_on_disk(self, tmp_path):
+        """
+        What it does: Seeds a low price, then observes a higher one.
+        Purpose: Pricing changes (or a bad seed) must be correctable.
+        """
+        state = tmp_path / "cache_meter.json"
+        state.write_text(json.dumps({"peaks": {"m": 1e-06}}))
+
+        meter = CacheMeter(min_samples=1, state_path=state)
+        meter.classify("m", 40_000, 10, 0.25)
+        meter.classify("m", 40_000, 10, 5.0)  # 1.25e-4, above the seed
+
+        assert json.loads(state.read_text())["peaks"]["m"] == pytest.approx(5.0 / 40_070)

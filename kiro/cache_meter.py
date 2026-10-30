@@ -247,13 +247,23 @@ class CacheMeter:
         return peaks
 
     def _save_peaks(self) -> None:
-        """Persist learned prices; failures never affect request handling."""
+        """
+        Persist learned prices, merging with what is already on disk.
+
+        A long-lived process holds only the prices it has seen itself; writing
+        its dictionary verbatim would erase a better baseline learned by another
+        run (or seeded by hand). Peaks only ever move up.
+        """
         if self.state_path is None:
             return
         try:
             path = Path(self.state_path)
+            merged = self._load_peaks()
+            for model, value in self._peaks.items():
+                merged[model] = max(value, merged.get(model, 0.0))
+            self._peaks.update(merged)
             path.write_text(
-                json.dumps({"peaks": self._peaks}, indent=2, ensure_ascii=False),
+                json.dumps({"peaks": merged}, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
         except OSError:
