@@ -366,6 +366,13 @@ AUTO_CONTEXT_PRUNE_RATIO: float = 0.45
 # Threshold used when the model window is unknown (legacy behaviour).
 AUTO_CONTEXT_PRUNE_FALLBACK_TOKENS: int = 220_000
 
+# Auto-compaction is a last resort. It asks the model to summarise old history
+# (a real upstream call that costs credits) and replaces the conversation
+# prefix, which invalidates the whole prompt cache. Keeping it well above the
+# prune threshold means ordinary sessions never reach it.
+AUTO_COMPACT_RATIO: float = 0.70
+AUTO_COMPACT_FALLBACK_TOKENS: int = 300_000
+
 # Suffixes the routers may append to a model name (effort / thinking variants).
 _MODEL_NAME_SUFFIXES: tuple = (
     "-xhigh",
@@ -384,6 +391,29 @@ _MODEL_INPUT_LIMITS: Dict[str, int] = {
 }
 
 
+def base_model_id(model_id: Optional[str]) -> str:
+    """
+    Reduce a client-facing model name to the catalog's base id.
+
+    Removes effort/thinking suffixes (``claude-opus-5.5-xhigh``) and resolves
+    aliases (``auto-kiro`` → ``auto``).
+
+    Args:
+        model_id: Model name as sent by the client or stored in the payload
+
+    Returns:
+        Base model id, or an empty string when nothing was provided
+    """
+    name = (model_id or "").strip()
+    if not name:
+        return ""
+    name = MODEL_ALIASES.get(name, name)
+    for suffix in _MODEL_NAME_SUFFIXES:
+        if name.endswith(suffix) and len(name) > len(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
 def model_max_input_tokens(model_id: Optional[str]) -> Optional[int]:
     """
     Look up a model's advertised max input tokens.
@@ -395,15 +425,9 @@ def model_max_input_tokens(model_id: Optional[str]) -> Optional[int]:
     Returns:
         Max input tokens from the built-in catalog, or None when unknown
     """
-    name = (model_id or "").strip()
+    name = base_model_id(model_id)
     if not name:
         return None
-
-    name = MODEL_ALIASES.get(name, name)
-    for suffix in _MODEL_NAME_SUFFIXES:
-        if name.endswith(suffix) and len(name) > len(suffix):
-            name = name[: -len(suffix)]
-            break
 
     limit = _MODEL_INPUT_LIMITS.get(name)
     if limit:

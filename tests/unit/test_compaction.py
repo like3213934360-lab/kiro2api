@@ -114,3 +114,65 @@ class TestCompaction:
             threshold_tokens=300_000,
         )
         assert compacted is None
+
+
+class TestAutoCompactThreshold:
+    """Compaction must stay a last resort, well above the prune threshold."""
+
+    def test_follows_the_model_window(self):
+        """
+        What it does: Looks up the threshold for small and large windows.
+        Purpose: One fixed 300k threshold compacted 1M-context sessions while
+                 pruning was still working on them.
+        """
+        assert compaction.auto_compact_threshold("claude-opus-5.5") == 700_000
+        assert compaction.auto_compact_threshold("claude-sonnet-4.5") == 140_000
+        assert compaction.auto_compact_threshold("unknown-model") == 300_000
+
+    def test_suffix_and_alias_are_handled(self):
+        """
+        What it does: Uses an effort suffix and an alias.
+        Purpose: The model name in the payload is not always the bare id.
+        """
+        assert compaction.auto_compact_threshold("claude-opus-5.5-xhigh") == 700_000
+        assert compaction.auto_compact_threshold("auto-kiro") == 700_000
+
+    def test_stays_above_the_prune_threshold(self, monkeypatch):
+        """
+        What it does: Compares both thresholds for several windows.
+        Purpose: Compaction during a pruned session would pay for a summary and
+                 drop the prompt cache for no benefit.
+        """
+        import kiro.converters_core as cc
+
+        for model in ("claude-opus-5.5", "claude-sonnet-4.5", "some-unknown"):
+            assert compaction.auto_compact_threshold(model) > cc.auto_prune_threshold(model)
+
+    def test_explicit_override_wins(self, monkeypatch):
+        """
+        What it does: Sets the legacy env override.
+        Purpose: Operators who pinned the old value keep control.
+        """
+        monkeypatch.setattr(compaction, "AUTO_COMPACT_TOKENS", 123_456)
+
+        assert compaction.auto_compact_threshold("claude-opus-5.5") == 123_456
+
+    @pytest.mark.asyncio
+    async def test_pruned_payload_is_not_compacted(self, monkeypatch):
+        """
+        What it does: Runs compaction on a payload just under the threshold.
+        Purpose: After pruning, the payload must fall below compaction and stay
+                 untouched.
+        """
+        request = make_request()
+
+        result = await compaction.maybe_compact_request(
+            request,
+            auth_manager=None,
+            conversation_id="c1",
+            profile_arn="arn:test",
+            shared_client=None,
+            estimated_tokens=compaction.auto_compact_threshold(request.model) - 1,
+        )
+
+        assert result is None

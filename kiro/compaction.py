@@ -28,6 +28,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
+from kiro.config import (
+    AUTO_COMPACT_FALLBACK_TOKENS,
+    AUTO_COMPACT_RATIO,
+    model_max_input_tokens,
+)
+
 from kiro.converters_anthropic import (
     convert_anthropic_content_to_text,
     extract_tool_results_from_anthropic_content,
@@ -39,11 +45,32 @@ from kiro.streaming_core import collect_stream_to_result
 from kiro.tokenizer import estimate_request_tokens
 
 
-# Trigger after automatic tool-result clearing has already run and the payload
-# is still this large. 300K leaves room for the summary + recent turns while
-# avoiding the 10-45s prefill cost of a 400K+ prompt.
-AUTO_COMPACT_TOKENS = int(os.getenv("AUTO_COMPACT_TOKENS", "300000"))
+# Auto-compaction is a last resort and must stay well above the pruning
+# threshold: it costs an upstream summarisation call AND replaces the prefix
+# (dropping the prompt cache). 0 means "follow the model window".
+AUTO_COMPACT_TOKENS = int(os.getenv("AUTO_COMPACT_TOKENS", "0") or 0)
 AUTO_COMPACT_KEEP_MESSAGES = 8
+
+
+def auto_compact_threshold(model_id: Optional[str]) -> int:
+    """
+    Token estimate at which auto-compaction is allowed to run.
+
+    Args:
+        model_id: Model id for the request (may carry an effort suffix)
+
+    Returns:
+        Threshold in estimated tokens: an explicit ``AUTO_COMPACT_TOKENS``
+        override when set, otherwise 70% of the model's input window
+    """
+    if AUTO_COMPACT_TOKENS > 0:
+        return AUTO_COMPACT_TOKENS
+    limit = model_max_input_tokens(model_id)
+    if not limit:
+        return AUTO_COMPACT_FALLBACK_TOKENS
+    return max(1, int(limit * AUTO_COMPACT_RATIO))
+
+
 SUMMARY_MODEL_ID = "claude-haiku-5.5"
 SUMMARY_MAX_CHARS = 12_000
 SUMMARY_CACHE_TTL_SECONDS = 600
@@ -214,7 +241,7 @@ async def maybe_compact_request(
     profile_arn: str,
     shared_client: Any,
     estimated_tokens: Optional[int] = None,
-    threshold_tokens: int = AUTO_COMPACT_TOKENS,
+    threshold_tokens: Optional[int] = None,
 ) -> Optional[Any]:
     """
     Return a compacted copy of the request, or None when no action is needed.
@@ -235,6 +262,9 @@ async def maybe_compact_request(
             system_prompt=system,
             apply_claude_correction=False,
         )["total_tokens"]
+
+    if threshold_tokens is None:
+        threshold_tokens = auto_compact_threshold(getattr(request_data, "model", None))
 
     if estimated_tokens <= threshold_tokens:
         return None

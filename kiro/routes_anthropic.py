@@ -62,7 +62,8 @@ from kiro.streaming_anthropic import (
 )
 from kiro.streaming_core import EmptyKiroResponseError
 from kiro.effort import effort_from_payload, split_effort_suffix
-from kiro.compaction import AUTO_COMPACT_TOKENS, maybe_compact_request
+from kiro.compaction import auto_compact_threshold, maybe_compact_request
+from kiro.request_log import note_payload_estimate
 from kiro.payload_guards import check_payload_size
 from kiro.http_client import KiroHttpClient
 from kiro.utils import conversation_diagnostic_id, resolve_conversation_id, summarize_cache_prefix
@@ -610,6 +611,7 @@ async def messages(
                     }
                 )
             
+            note_payload_estimate(request, kiro_payload)
             request.state.request_log_effort = effort_from_payload(kiro_payload)
 
             # Log Kiro payload (only when debug logging is enabled; serializing
@@ -628,7 +630,8 @@ async def messages(
             # turns and rebuild. The client keeps its full history; only this
             # outbound payload is compacted.
             payload_tokens = int(check_payload_size(kiro_payload) / 3.5)
-            if payload_tokens > AUTO_COMPACT_TOKENS:
+            compact_threshold = auto_compact_threshold(request_data.model)
+            if payload_tokens > compact_threshold:
                 compacted = await maybe_compact_request(
                     request_data,
                     auth_manager,
@@ -636,6 +639,7 @@ async def messages(
                     profile_arn_for_payload,
                     shared_client=request.app.state.http_client,
                     estimated_tokens=payload_tokens,
+                    threshold_tokens=compact_threshold,
                 )
                 if compacted is not None:
                     request_data = compacted
@@ -646,6 +650,7 @@ async def messages(
                         f"[AutoCompact] payload ~{payload_tokens} tokens -> "
                         f"~{int(check_payload_size(kiro_payload) / 3.5)} tokens"
                     )
+            note_payload_estimate(request, kiro_payload)
             request.state.request_log_effort = effort_from_payload(kiro_payload)
             
             # Create HTTP client
@@ -971,6 +976,7 @@ async def messages(
             }
         )
     
+    note_payload_estimate(request, kiro_payload)
     request.state.request_log_effort = effort_from_payload(kiro_payload)
 
     # Log Kiro payload (only when debug logging is enabled; serializing
@@ -986,7 +992,8 @@ async def messages(
     logger.info(f"[CachePrefix] {summarize_cache_prefix(kiro_payload)}")
 
     payload_tokens = int(check_payload_size(kiro_payload) / 3.5)
-    if payload_tokens > AUTO_COMPACT_TOKENS:
+    compact_threshold = auto_compact_threshold(request_data.model)
+    if payload_tokens > compact_threshold:
         compacted = await maybe_compact_request(
             request_data,
             auth_manager,
@@ -994,6 +1001,7 @@ async def messages(
             profile_arn_for_payload,
             shared_client=request.app.state.http_client,
             estimated_tokens=payload_tokens,
+            threshold_tokens=compact_threshold,
         )
         if compacted is not None:
             request_data = compacted
@@ -1004,6 +1012,7 @@ async def messages(
                 f"[AutoCompact] payload ~{payload_tokens} tokens -> "
                 f"~{int(check_payload_size(kiro_payload) / 3.5)} tokens"
             )
+    note_payload_estimate(request, kiro_payload)
     request.state.request_log_effort = effort_from_payload(kiro_payload)
     
     # Create HTTP client with retry logic
