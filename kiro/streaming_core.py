@@ -48,6 +48,7 @@ from kiro.config import (
 )
 from kiro.thinking_parser import ThinkingParser
 from kiro.cache_meter import cache_meter
+from kiro.request_context import get_payload_estimate
 
 if TYPE_CHECKING:
     from kiro.cache import ModelInfoCache
@@ -395,6 +396,31 @@ def _model_rate(model_cache: Any, model: str) -> Tuple[Optional[float], Optional
         multiplier = float(raw_multiplier)
     unit = raw_unit if isinstance(raw_unit, str) and raw_unit else None
     return multiplier, unit
+
+
+def effective_prompt_tokens(kiro_tokens: int) -> int:
+    """
+    Prompt size reported to the client.
+
+    Kiro reports a context-usage percentage, which understates the real prompt
+    (measured: 362k reported vs 490k of payload). Claude Code decides when to
+    auto-compact from the usage it receives, so reporting the understated value
+    keeps its compaction from ever firing and lets the session grow until the
+    gateway has to prune — which is what breaks the prefix cache.
+
+    Args:
+        kiro_tokens: Prompt tokens derived from Kiro's context usage
+
+    Returns:
+        The larger of the measured payload size and ``kiro_tokens``. Never
+        report less than either source: an understated prompt defeats the
+        purpose, and the two measures disagree in both directions depending on
+        how dense the payload is.
+    """
+    estimate = get_payload_estimate()
+    if isinstance(estimate, int) and estimate > 0:
+        return max(estimate, kiro_tokens)
+    return kiro_tokens
 
 
 def log_usage_summary(

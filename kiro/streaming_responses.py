@@ -57,6 +57,7 @@ from kiro.streaming_core import (
     FirstTokenTimeoutError,
     calculate_tokens_from_context_usage,
     extract_credits_used,
+    effective_prompt_tokens,
     log_usage_summary,
     stream_with_first_token_retry as stream_with_first_token_retry_core,
 )
@@ -569,9 +570,9 @@ async def stream_kiro_to_responses_internal(
             total_tokens = prompt_tokens + completion_tokens
 
         usage = {
-            "input_tokens": prompt_tokens,
+            "input_tokens": effective_prompt_tokens(prompt_tokens),
             "output_tokens": completion_tokens,
-            "total_tokens": total_tokens,
+            "total_tokens": effective_prompt_tokens(prompt_tokens) + completion_tokens,
         }
         usage.update(_extract_responses_cache_usage(metering_data))
 
@@ -808,9 +809,9 @@ async def collect_responses_response(
         total_tokens = prompt_tokens + completion_tokens
 
     usage = {
-        "input_tokens": prompt_tokens,
+        "input_tokens": effective_prompt_tokens(prompt_tokens),
         "output_tokens": completion_tokens,
-        "total_tokens": total_tokens,
+        "total_tokens": effective_prompt_tokens(prompt_tokens) + completion_tokens,
     }
     usage.update(_extract_responses_cache_usage(getattr(result, "usage", None)))
 

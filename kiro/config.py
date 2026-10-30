@@ -361,7 +361,7 @@ FALLBACK_MODELS: List[Dict[str, Any]] = [
 # hit the cache 0% of the time; turns that did not hit roughly 90% of the time
 # and were billed ~10% of the uncached price. Keeping the rewrite rare keeps the
 # cache warm, which matters far more than shaving a few thousand tokens.
-AUTO_CONTEXT_PRUNE_RATIO: float = 0.70
+AUTO_CONTEXT_PRUNE_RATIO: float = 0.85
 
 # Threshold used when the model window is unknown (legacy behaviour).
 AUTO_CONTEXT_PRUNE_FALLBACK_TOKENS: int = 220_000
@@ -370,7 +370,7 @@ AUTO_CONTEXT_PRUNE_FALLBACK_TOKENS: int = 220_000
 # (a real upstream call that costs credits) and replaces the conversation
 # prefix, which invalidates the whole prompt cache. Keeping it well above the
 # prune threshold means ordinary sessions never reach it.
-AUTO_COMPACT_RATIO: float = 0.85
+AUTO_COMPACT_RATIO: float = 0.95
 AUTO_COMPACT_FALLBACK_TOKENS: int = 300_000
 
 # Suffixes the routers may append to a model name (effort / thinking variants).

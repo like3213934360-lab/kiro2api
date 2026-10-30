@@ -55,6 +55,7 @@ from kiro.streaming_core import (
     KiroEvent,
     calculate_tokens_from_context_usage,
     extract_credits_used,
+    effective_prompt_tokens,
     log_usage_summary,
     stream_with_first_token_retry as stream_with_first_token_retry_core,
     with_keepalive,
@@ -462,9 +463,9 @@ async def stream_kiro_to_openai_internal(
             "model": model,
             "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
             "usage": {
-                "prompt_tokens": prompt_tokens,
+                "prompt_tokens": effective_prompt_tokens(prompt_tokens),
                 "completion_tokens": completion_tokens,
-                "total_tokens": total_tokens,
+                "total_tokens": effective_prompt_tokens(prompt_tokens) + completion_tokens,
             }
         }
         

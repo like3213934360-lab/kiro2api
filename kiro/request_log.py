@@ -32,6 +32,7 @@ def note_payload_estimate(request: Any, payload: Any) -> int:
         Estimated prompt tokens
     """
     from kiro.payload_guards import check_payload_size
+    from kiro.request_context import set_payload_estimate
 
     size = int(check_payload_size(payload))
     estimate = int(size / 3.5)
@@ -40,6 +41,7 @@ def note_payload_estimate(request: Any, payload: Any) -> int:
         request.state.payload_estimate_tokens = estimate
     except AttributeError:
         pass
+    set_payload_estimate(estimate)
     return estimate
 
 

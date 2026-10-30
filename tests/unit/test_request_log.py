@@ -62,3 +62,20 @@ def test_note_payload_estimate_tolerates_plain_object():
     estimate = note_payload_estimate(_NoState(), {"a": 1})
 
     assert estimate >= 0
+
+
+def test_note_payload_estimate_sets_the_request_context():
+    """
+    What it does: Records a payload size and reads the context variable.
+    Purpose: Streaming code reports this number to the client so its
+             auto-compaction fires at the right time.
+    """
+    from types import SimpleNamespace
+
+    from kiro.request_context import get_payload_estimate
+    from kiro.request_log import note_payload_estimate
+
+    request = SimpleNamespace(state=SimpleNamespace())
+    estimate = note_payload_estimate(request, {"a": "x" * 700})
+
+    assert get_payload_estimate() == estimate

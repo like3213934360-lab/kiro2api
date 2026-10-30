@@ -1895,6 +1895,24 @@ def reset_auth_throttle():
 
 
 @pytest.fixture(autouse=True)
+def reset_request_context():
+    """
+    Clear per-request context variables between tests.
+
+    ``payload_estimate_tokens`` is a ContextVar set by the route handler; pytest
+    runs everything in one context, so without this reset a value from one test
+    would leak into the next.
+    """
+    from kiro.request_context import set_payload_estimate
+
+    set_payload_estimate(None)
+    try:
+        yield
+    finally:
+        set_payload_estimate(None)
+
+
+@pytest.fixture(autouse=True)
 def isolate_cache_meter():
     """
     Keep the shared cache meter away from the real state file.

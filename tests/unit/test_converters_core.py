@@ -6932,8 +6932,8 @@ class TestAutoPruneContext:
         unknown = cc.auto_prune_threshold("some-unknown-model")
         suffixed = cc.auto_prune_threshold("claude-opus-5.5-xhigh")
 
-        assert big == int(1_000_000 * 0.70)
-        assert small == int(200_000 * 0.70)
+        assert big == int(1_000_000 * 0.85)
+        assert small == int(200_000 * 0.85)
         assert unknown == 220_000
         assert suffixed == big
 
@@ -6945,7 +6945,7 @@ class TestAutoPruneContext:
         """
         import kiro.converters_core as cc
 
-        monkeypatch.setattr(cc, "model_max_input_tokens", lambda model_id: 10_000)
+        monkeypatch.setattr(cc, "model_max_input_tokens", lambda model_id: 6_000)
         monkeypatch.setattr(cc, "AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS", 2)
         monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_CHARS", 200)
 
@@ -7001,12 +7001,12 @@ class TestAutoPruneContext:
         estimate = int(cc.check_payload_size(payload) / 3.5)
 
         monkeypatch.setattr(
-            cc, "model_max_input_tokens", lambda model_id: max(10_000, estimate * 4)
+            cc, "model_max_input_tokens", lambda model_id: max(1_000, estimate * 4)
         )
         assert auto_prune_context(payload, "big-window") == 0
 
         monkeypatch.setattr(
-            cc, "model_max_input_tokens", lambda model_id: max(10_000, int(estimate / 1.5))
+            cc, "model_max_input_tokens", lambda model_id: max(1_000, int(estimate / 1.5))
         )
         assert auto_prune_context(payload, "small-window") > 0
 

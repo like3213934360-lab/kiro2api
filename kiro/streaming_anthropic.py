@@ -62,6 +62,7 @@ from kiro.streaming_core import (
     log_usage_summary,
     stream_with_first_token_retry,
     with_keepalive,
+    effective_prompt_tokens,
 )
 from kiro.tokenizer import count_tokens, estimate_request_tokens
 from kiro.parsers import parse_bracket_tool_calls, deduplicate_tool_calls
@@ -257,7 +258,7 @@ async def stream_kiro_to_anthropic(
                 "stop_reason": None,
                 "stop_sequence": None,
                 "usage": {
-                    "input_tokens": input_tokens,
+                    "input_tokens": effective_prompt_tokens(input_tokens),
                     "output_tokens": 0
                 }
             }
@@ -1256,7 +1257,7 @@ async def collect_anthropic_response(
     )
     
     usage_payload: Dict[str, Any] = {
-        "input_tokens": input_tokens,
+        "input_tokens": effective_prompt_tokens(input_tokens),
         "output_tokens": output_tokens
     }
     usage_payload.update(upstream_cache_usage)

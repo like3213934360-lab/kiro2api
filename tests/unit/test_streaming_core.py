@@ -2051,3 +2051,36 @@ class TestWithKeepalive:
         print(f"Real chunks: {real}")
         assert real == ["c0", "c1", "c2", "c3", "c4"]
         print("✓ Chunk order preserved")
+
+
+class TestEffectivePromptTokens:
+    """The client must see the real prompt size, not Kiro's percentage."""
+
+    def test_uses_the_measured_payload(self):
+        """
+        What it does: Sets a payload estimate and asks for the reported size.
+        Purpose: An understated prompt keeps Claude Code's auto-compact from
+                 ever firing, so the session grows until the gateway prunes.
+        """
+        from kiro.request_context import set_payload_estimate
+        from kiro.streaming_core import effective_prompt_tokens
+
+        set_payload_estimate(490_000)
+
+        assert effective_prompt_tokens(362_000) == 490_000
+        # Never understate: small payloads measure lower than Kiro's count.
+        assert effective_prompt_tokens(520_000) == 520_000
+
+    def test_falls_back_to_kiro_when_unmeasured(self):
+        """
+        What it does: Clears the estimate.
+        Purpose: Requests without a payload measurement keep the old value.
+        """
+        from kiro.request_context import set_payload_estimate
+        from kiro.streaming_core import effective_prompt_tokens
+
+        set_payload_estimate(None)
+        assert effective_prompt_tokens(1234) == 1234
+
+        set_payload_estimate(0)
+        assert effective_prompt_tokens(1234) == 1234
