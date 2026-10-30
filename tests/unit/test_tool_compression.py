@@ -203,7 +203,7 @@ class TestLogsAndCap:
         What it does: Compresses a 200 KB blob.
         Purpose: One pathological output must not blow the whole context.
         """
-        text = "A" * 100_000 + "MIDDLE" + "B" * 100_000
+        text = "A" * 200_000 + "MIDDLE" + "B" * 200_000
 
         compressed, kind = compress_text(text)
 
@@ -284,24 +284,25 @@ class TestSmartTruncate:
 
     def test_long_code_read_is_truncated(self):
         """
-        What it does: Compresses a 400-line source file.
-        Purpose: Long reads dominate Read-heavy sessions.
+        What it does: Compresses a 2500-line source file.
+        Purpose: Only pathological reads are cut; normal files stay verbatim.
         """
-        text = "\n".join(f"    value_{i} = compute_{i}()" for i in range(400))
+        text = "\n".join(f"    value_{i} = compute_{i}()" for i in range(2500))
 
         compressed, kind = compress_text(text)
 
         assert kind == "truncate"
         assert "lines omitted" in compressed
         assert compressed.splitlines()[0] == "    value_0 = compute_0()"
-        assert compressed.splitlines()[-1] == "    value_399 = compute_399()"
+        assert compressed.splitlines()[-1] == "    value_2499 = compute_2499()"
 
-    def test_short_read_is_untouched(self):
+    def test_normal_read_is_untouched(self):
         """
-        What it does: Compresses a 100-line file.
-        Purpose: Small files must reach the model verbatim.
+        What it does: Compresses a 600-line file.
+        Purpose: Truncating ordinary reads makes the model re-read them, which
+                 costs more than the tokens saved.
         """
-        text = "\n".join(f"    value_{i} = compute_{i}()" for i in range(100))
+        text = "\n".join(f"    value_{i} = compute_{i}()" for i in range(600))
 
         compressed, kind = compress_text(text)
 
@@ -313,7 +314,7 @@ class TestSmartTruncate:
         What it does: Truncates the same file twice.
         Purpose: Repeated turns must send identical bytes.
         """
-        text = "\n".join(f"    value_{i}()" for i in range(400))
+        text = "\n".join(f"    value_{i}()" for i in range(2500))
         once, _ = compress_text(text)
         twice, kind = compress_text(once)
 

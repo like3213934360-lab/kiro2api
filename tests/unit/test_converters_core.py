@@ -6932,8 +6932,8 @@ class TestAutoPruneContext:
         unknown = cc.auto_prune_threshold("some-unknown-model")
         suffixed = cc.auto_prune_threshold("claude-opus-5.5-xhigh")
 
-        assert big == int(1_000_000 * 0.45)
-        assert small == int(200_000 * 0.45)
+        assert big == int(1_000_000 * 0.70)
+        assert small == int(200_000 * 0.70)
         assert unknown == 220_000
         assert suffixed == big
 

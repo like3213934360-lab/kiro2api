@@ -125,8 +125,8 @@ class TestAutoCompactThreshold:
         Purpose: One fixed 300k threshold compacted 1M-context sessions while
                  pruning was still working on them.
         """
-        assert compaction.auto_compact_threshold("claude-opus-5.5") == 700_000
-        assert compaction.auto_compact_threshold("claude-sonnet-4.5") == 140_000
+        assert compaction.auto_compact_threshold("claude-opus-5.5") == 850_000
+        assert compaction.auto_compact_threshold("claude-sonnet-4.5") == 170_000
         assert compaction.auto_compact_threshold("unknown-model") == 300_000
 
     def test_suffix_and_alias_are_handled(self):
@@ -134,8 +134,8 @@ class TestAutoCompactThreshold:
         What it does: Uses an effort suffix and an alias.
         Purpose: The model name in the payload is not always the bare id.
         """
-        assert compaction.auto_compact_threshold("claude-opus-5.5-xhigh") == 700_000
-        assert compaction.auto_compact_threshold("auto-kiro") == 700_000
+        assert compaction.auto_compact_threshold("claude-opus-5.5-xhigh") == 850_000
+        assert compaction.auto_compact_threshold("auto-kiro") == 850_000
 
     def test_stays_above_the_prune_threshold(self, monkeypatch):
         """

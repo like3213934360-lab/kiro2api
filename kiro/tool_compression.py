@@ -26,7 +26,7 @@ Rules, in order (first match wins):
 * ``grep`` — at most 10 matches per file, with a match count header
 * ``find``/``ls`` listings — cap the number of entries
 * build/test logs — collapse repeated lines, then cap
-* any other long text (file reads) — keep head and tail
+* any other long text (file reads) — keep head and tail, only above 2000 lines
 
 Error results are never touched, and anything already carrying a marker is left
 alone (idempotency).
@@ -50,10 +50,13 @@ MIN_COMPRESS_BYTES = 800
 # "OK" or a version string are normal and cheap).
 MIN_DEDUPE_BYTES = 500
 
-# Last-resort ceiling for a single tool result.
-HARD_CAP_BYTES = 50_000
-HARD_CAP_HEAD = 24_000
-HARD_CAP_TAIL = 16_000
+# Last-resort ceiling for a single tool result. Only pathological outputs (a
+# whole generated file, a giant log dump) should ever reach this: truncating
+# ordinary file reads makes the model re-read them, which costs far more than
+# the tokens saved.
+HARD_CAP_BYTES = 200_000
+HARD_CAP_HEAD = 100_000
+HARD_CAP_TAIL = 60_000
 
 # Per-format ceilings (mirrors 9router's RTK defaults).
 MAX_DIFF_HUNK_LINES = 120
@@ -64,10 +67,13 @@ MAX_LISTING_LINES = 200
 MAX_TREE_LINES = 200
 MAX_LOG_LINES = 400
 
-# Generic long-text fallback (file reads and anything unclassified).
-SMART_TRUNCATE_MIN_LINES = 250
-SMART_TRUNCATE_HEAD = 120
-SMART_TRUNCATE_TAIL = 60
+# Generic long-text fallback (file reads and anything unclassified). Kept very
+# high on purpose: a truncated read is worse than a large prompt, because the
+# model answers by reading the file again (measured: 100 tool calls in one turn
+# when reads were cut at 250 lines).
+SMART_TRUNCATE_MIN_LINES = 2000
+SMART_TRUNCATE_HEAD = 1200
+SMART_TRUNCATE_TAIL = 600
 
 STATUS_MAX_FILES = 10
 
