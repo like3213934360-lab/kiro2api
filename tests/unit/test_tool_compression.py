@@ -154,12 +154,18 @@ class TestGrepAndListing:
         Purpose: Match spam dominates the prompt without adding much; the
                  per-file grouping keeps the signal and the counts.
         """
+        from kiro.tool_compression import GREP_PER_FILE_MAX
+
         compressed, kind = compress_text(make_grep(800))
 
         assert kind == "grep"
         assert "800 matches in 40 file(s):" in compressed
         assert "[file] src/file0.py" in compressed
-        assert "  +10 more" in compressed
+        # 20 hits per file: shown in full while the per-file budget allows it.
+        if 20 > GREP_PER_FILE_MAX:
+            assert f"  +{20 - GREP_PER_FILE_MAX} more" in compressed
+        else:
+            assert "match text 0" in compressed
         assert compressed.count("\n") < 800
 
     def test_listing_entries_are_capped(self):
@@ -220,8 +226,11 @@ class TestGitFilters:
     def test_git_status_becomes_counts(self):
         """
         What it does: Compresses a long-form git status with many files.
-        Purpose: The useful signal is which section a path is in, not every path.
+        Purpose: The useful signal is which section a path is in and which files
+                 changed. Capping the list too early made the model re-run
+                 `git status` instead of reading it (measured: 20 identical runs).
         """
+        from kiro.tool_compression import STATUS_MAX_FILES
         lines = ["On branch main", "Your branch is up to date with 'origin/main'.", "",
                  "Changes not staged for commit:", '  (use "git add <file>..." to update)']
         lines += [f"\tmodified:   src/file{i}.py" for i in range(30)]
@@ -233,7 +242,10 @@ class TestGitFilters:
         assert "* main" in compressed
         assert "~ Modified: 30 file(s)" in compressed
         assert "? Untracked: 12 file(s)" in compressed
-        assert "... +20 more" in compressed
+        if 30 > STATUS_MAX_FILES:
+            assert f"... +{30 - STATUS_MAX_FILES} more" in compressed
+        else:
+            assert "src/file29.py" in compressed   # the whole list is available
         assert len(compressed) < len("\n".join(lines))
 
     def test_git_status_is_idempotent(self):
@@ -431,3 +443,57 @@ class TestStatsFormatting:
         assert "40.0%" in line
         assert "diff=2" in line
         assert "grep=1" in line
+
+
+class TestLogKeepsFailures:
+    """
+    A capped build log must still contain its failure lines.
+
+    Failures usually sit in the middle of a long log. Dropping them made the model
+    re-run the build — the most expensive reaction available (minutes of build
+    plus a fully re-prefilled prompt).
+    """
+
+    def test_error_line_from_the_middle_survives(self):
+        """
+        What it does: Covers a 2,500-line log whose only error is in the middle.
+        Purpose: The model must be able to read the failure without re-running.
+        """
+        log = (
+            "Compiling 312 files...\n"
+            + "\n".join(f"info: ok {i}" for i in range(1000))
+            + "\nERROR: hvigor failed at StarShell.ets:42\n"
+            + "\n".join(f"info: ok {i}" for i in range(1000, 2400))
+            + "\nBUILD FAILED"
+        )
+        compressed, kind = compress_text(log)
+
+        assert kind == "log"
+        assert "ERROR: hvigor failed at StarShell.ets:42" in compressed
+        assert compressed.strip().endswith("BUILD FAILED")
+        assert "omitted" in compressed
+
+    def test_rescued_lines_are_capped(self):
+        """
+        What it does: Covers a log where every omitted line looks like an error.
+        Purpose: A pathological log must not defeat the cap it is rescued from.
+        """
+        from kiro.tool_compression import MAX_LOG_KEPT_ERRORS
+
+        log = "\n".join(f"ERROR: failure {i}" for i in range(1200))
+        compressed, kind = compress_text(log)
+
+        assert kind == "log"
+        kept = compressed.count("ERROR: failure")
+        assert kept <= MAX_LOG_KEPT_ERRORS + 400  # rescued block + head/tail
+
+    def test_clean_log_reports_a_plain_gap(self):
+        """
+        What it does: Covers a long log with no failures.
+        Purpose: No fake "error lines kept" note when there is nothing to keep.
+        """
+        log = "\n".join(f"info: step {i}" for i in range(1200))
+        compressed, _ = compress_text(log)
+
+        assert "error/failure" not in compressed
+        assert "lines omitted" in compressed

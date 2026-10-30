@@ -31,11 +31,13 @@ def note_payload_estimate(request: Any, payload: Any) -> int:
     Returns:
         Estimated prompt tokens
     """
-    from kiro.payload_guards import check_payload_size
+    from kiro.payload_guards import estimate_payload_tokens, check_payload_size
     from kiro.request_context import set_payload_estimate
 
     size = int(check_payload_size(payload))
-    estimate = int(size / 3.5)
+    # Images are counted per-image, not by their base64 size: otherwise one
+    # screenshot inflates the reported prompt by two orders of magnitude.
+    estimate = int(estimate_payload_tokens(payload))
     try:
         request.state.payload_bytes = size
         request.state.payload_estimate_tokens = estimate

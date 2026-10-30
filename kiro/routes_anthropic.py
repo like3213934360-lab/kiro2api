@@ -65,7 +65,11 @@ from kiro.effort import effort_from_payload, split_effort_suffix
 from kiro.compaction import auto_compact_threshold, maybe_compact_request
 from kiro.request_log import note_payload_estimate
 from kiro.request_context import set_client_prompt_tokens
-from kiro.payload_guards import check_payload_size, exceeds_input_window
+from kiro.payload_guards import (
+    check_payload_size,
+    estimate_payload_tokens,
+    exceeds_input_window,
+)
 from kiro.http_client import KiroHttpClient
 from kiro.utils import conversation_diagnostic_id, resolve_conversation_id, summarize_cache_prefix
 from kiro.tokenizer import estimate_request_tokens, estimate_request_tokens_async
@@ -636,7 +640,7 @@ async def messages(
             # If old tool-result clearing was not enough, summarize the older
             # turns and rebuild. The client keeps its full history; only this
             # outbound payload is compacted.
-            payload_tokens = int(check_payload_size(kiro_payload) / 3.5)
+            payload_tokens = estimate_payload_tokens(kiro_payload)
 
             # Compaction below rewrites the prompt. Record the size it is about
             # to shrink from, so the client keeps seeing how large its own
@@ -661,7 +665,7 @@ async def messages(
                     )
                     logger.info(
                         f"[AutoCompact] payload ~{payload_tokens} tokens -> "
-                        f"~{int(check_payload_size(kiro_payload) / 3.5)} tokens"
+                        f"~{estimate_payload_tokens(kiro_payload)} tokens"
                     )
 
             # Last line of defence: even after compaction the prompt can still be
@@ -670,7 +674,7 @@ async def messages(
             # tail silently; returning Anthropic's standard error makes the client
             # compact instead, which is the only side that can actually shrink the
             # conversation it holds.
-            final_payload_tokens = int(check_payload_size(kiro_payload) / 3.5)
+            final_payload_tokens = estimate_payload_tokens(kiro_payload)
             if exceeds_input_window(final_payload_tokens, max_input_tokens):
                 logger.warning(
                     f"[ContextTooLong] payload ~{final_payload_tokens} tokens > "
@@ -1021,7 +1025,7 @@ async def messages(
     # Cache-hit diagnosis: shows which prefix component changes per turn
     logger.info(f"[CachePrefix] {summarize_cache_prefix(kiro_payload)}")
 
-    payload_tokens = int(check_payload_size(kiro_payload) / 3.5)
+    payload_tokens = estimate_payload_tokens(kiro_payload)
     compact_threshold = auto_compact_threshold(request_data.model)
     if payload_tokens > compact_threshold:
         compacted = await maybe_compact_request(
@@ -1040,7 +1044,7 @@ async def messages(
             )
             logger.info(
                 f"[AutoCompact] payload ~{payload_tokens} tokens -> "
-                f"~{int(check_payload_size(kiro_payload) / 3.5)} tokens"
+                f"~{estimate_payload_tokens(kiro_payload)} tokens"
             )
     note_payload_estimate(request, kiro_payload)
     request.state.request_log_effort = effort_from_payload(kiro_payload)

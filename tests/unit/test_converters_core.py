@@ -7219,3 +7219,90 @@ class TestAutoPruneKeepsTheVerdict:
         text = first["content"][0]["text"]
         assert text.endswith("exit=1")
         assert "grep -rn StarWindowInsets" in text
+
+
+class TestToolResultStatus:
+    """
+    A failed tool result must reach Kiro as a failure.
+
+    The structured status is how the model knows a command did not work; the text
+    may also be compressed, so losing the flag leaves it guessing — and guessing
+    usually means running the command again.
+    """
+
+    def test_error_result_is_marked_error(self):
+        """
+        What it does: Converts a tool result whose is_error is true.
+        Purpose: Regression: every result used to be sent as "success".
+        """
+        from kiro.converters_core import convert_tool_results_to_kiro_format
+
+        results = convert_tool_results_to_kiro_format([
+            {"tool_use_id": "call_1", "content": "error: build failed", "is_error": True},
+        ])
+
+        assert results[0]["status"] == "error"
+        assert results[0]["content"][0]["text"] == "error: build failed"
+
+    def test_success_result_is_marked_success(self):
+        """
+        What it does: Converts a normal result.
+        Purpose: The flag must not flip every result to error.
+        """
+        from kiro.converters_core import convert_tool_results_to_kiro_format
+
+        results = convert_tool_results_to_kiro_format([
+            {"tool_use_id": "call_1", "content": "ok"},
+        ])
+
+        assert results[0]["status"] == "success"
+
+    def test_missing_flag_defaults_to_success(self):
+        """
+        What it does: Converts a result without is_error.
+        Purpose: Older clients and synthetic results must keep working.
+        """
+        from kiro.converters_core import convert_tool_results_to_kiro_format
+
+        results = convert_tool_results_to_kiro_format([
+            {"tool_use_id": "call_1", "content": "ok", "is_error": None},
+        ])
+
+        assert results[0]["status"] == "success"
+
+
+class TestAnthropicToolResultStatus:
+    """The Anthropic adapter must carry is_error into the unified format."""
+
+    def test_is_error_is_preserved(self):
+        """
+        What it does: Extracts tool results from an Anthropic content block.
+        Purpose: Dropping the flag here made the converter above unable to ever
+                 report a failure.
+        """
+        from kiro.converters_anthropic import extract_tool_results_from_anthropic_content
+
+        content = [{
+            "type": "tool_result",
+            "tool_use_id": "call_9",
+            "content": "exit=1",
+            "is_error": True,
+        }]
+
+        results = extract_tool_results_from_anthropic_content(content)
+
+        assert results[0]["is_error"] is True
+        assert results[0]["content"] == "exit=1"
+
+    def test_missing_flag_stays_false(self):
+        """
+        What it does: Extracts a normal result.
+        Purpose: Absence must not be read as a failure.
+        """
+        from kiro.converters_anthropic import extract_tool_results_from_anthropic_content
+
+        results = extract_tool_results_from_anthropic_content([
+            {"type": "tool_result", "tool_use_id": "call_9", "content": "ok"},
+        ])
+
+        assert results[0]["is_error"] is False

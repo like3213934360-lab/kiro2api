@@ -246,3 +246,98 @@ class TestExceedsInputWindow:
         from kiro.payload_guards import exceeds_input_window
 
         assert exceeds_input_window(10_000_000, 0) is False
+
+
+class TestImageAwareTokenEstimate:
+    """
+    Inline images must not be measured as text.
+
+    A 288 KB screenshot is ~1,500 tokens but ~84,000 when its base64 is counted
+    as ordinary JSON. That inflated number drove pruning, compaction and the
+    client's own auto-compaction, hiding history the model needed.
+    """
+
+    @staticmethod
+    def _image(size: int = 220_000) -> dict:
+        import base64
+        import os
+
+        return {"format": "jpeg", "source": {"bytes": base64.b64encode(os.urandom(size)).decode()}}
+
+    def test_one_screenshot_costs_about_one_image(self):
+        """
+        What it does: Estimates a payload carrying a 288 KB screenshot.
+        Purpose: The estimate must stay within the image's real cost, not grow
+                 with its base64 length.
+        """
+        from kiro.payload_guards import IMAGE_TOKEN_ESTIMATE, estimate_payload_tokens
+
+        payload = {"conversationState": {"currentMessage": {"userInputMessage": {
+            "content": "x" * 400, "images": [self._image()]}}}}
+        estimate = estimate_payload_tokens(payload)
+
+        print(f"estimate={estimate}")
+        assert estimate < IMAGE_TOKEN_ESTIMATE + 1_000
+
+    def test_text_estimate_matches_the_byte_rule(self):
+        """
+        What it does: Estimates a payload with no images.
+        Purpose: Plain text must keep the previous accuracy.
+        """
+        from kiro.payload_guards import check_payload_size, estimate_payload_tokens
+
+        payload = {"conversationState": {"currentMessage": {"userInputMessage": {
+            "content": "hello world " * 500, "images": []}}}}
+
+        assert estimate_payload_tokens(payload) == int(check_payload_size(payload) / 3.5)
+
+    def test_each_image_is_counted(self):
+        """
+        What it does: Estimates a payload with five screenshots.
+        Purpose: A session accumulates images across turns; the charge is per
+                 image, not per payload.
+        """
+        from kiro.payload_guards import IMAGE_TOKEN_ESTIMATE, estimate_payload_tokens
+
+        payload = {"conversationState": {"history": [
+            {"userInputMessage": {"content": "", "images": [self._image(50_000)]}}
+            for _ in range(5)
+        ]}}
+
+        # Per-image charge, plus the small JSON overhead around each block.
+        assert 5 * IMAGE_TOKEN_ESTIMATE <= estimate_payload_tokens(payload) < 5 * IMAGE_TOKEN_ESTIMATE + 500
+
+    def test_anthropic_shaped_images_are_detected(self):
+        """
+        What it does: Estimates an Anthropic-style image block.
+        Purpose: The same helper is used before conversion; both shapes must be
+                 recognised or the fix silently stops working.
+        """
+        from kiro.payload_guards import IMAGE_TOKEN_ESTIMATE, estimate_payload_tokens
+
+        payload = {"messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                         "data": "A" * 100_000}},
+        ]}]}
+
+        # Image charge plus the tiny JSON wrapper around it.
+        assert IMAGE_TOKEN_ESTIMATE <= estimate_payload_tokens(payload) < IMAGE_TOKEN_ESTIMATE + 200
+
+    def test_real_session_shape_stays_small(self):
+        """
+        What it does: Reproduces the failing session: 6 screenshots plus 200 KB
+                 of tool output.
+        Purpose: That payload used to read as >300K tokens; it must now read as
+                 the text it actually contains.
+        """
+        from kiro.payload_guards import estimate_payload_tokens
+
+        payload = {"conversationState": {
+            "history": [{"userInputMessage": {"content": "tool output " * 400,
+                                              "images": [self._image(180_000)]}} for _ in range(6)],
+            "currentMessage": {"userInputMessage": {"content": "continue"}},
+        }}
+
+        estimate = estimate_payload_tokens(payload)
+        print(f"estimate={estimate:,}")
+        assert estimate < 120_000

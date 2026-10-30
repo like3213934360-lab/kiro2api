@@ -49,7 +49,12 @@ from kiro.config import (
     AUTO_CONTEXT_PRUNE_FALLBACK_TOKENS,
     model_max_input_tokens,
 )
-from kiro.payload_guards import check_payload_size, trim_payload_to_limit
+from kiro.payload_guards import (
+    check_payload_size,
+    estimate_payload_tokens,
+    payload_image_stats,
+    trim_payload_to_limit,
+)
 from kiro.request_context import set_client_prompt_tokens
 from kiro.tool_compression import compress_tool_outputs
 
@@ -900,7 +905,7 @@ def convert_tool_results_to_kiro_format(tool_results: List[Dict[str, Any]]) -> L
         
         kiro_results.append({
             "content": [{"text": content_text}],
-            "status": "success",
+            "status": "error" if tr.get("is_error") else "success",
             "toolUseId": tr.get("tool_use_id", "")
         })
     
@@ -927,7 +932,7 @@ def extract_tool_results_from_content(content: Any) -> List[Dict[str, Any]]:
             if isinstance(item, dict) and item.get("type") == "tool_result":
                 tool_results.append({
                     "content": [{"text": extract_text_content(item.get("content", "")) or "(empty result)"}],
-                    "status": "success",
+                    "status": "error" if item.get("is_error") else "success",
                     "toolUseId": item.get("tool_use_id", "")
                 })
     
@@ -1672,7 +1677,7 @@ def auto_prune_context(payload: Dict[str, Any], model_id: Optional[str] = None) 
     # Fast estimate: serialized bytes / 3.5 approximates tokens well enough
     # for a pruning decision and avoids running a tokenizer on every turn.
     threshold = auto_prune_threshold(model_id)
-    estimated_tokens = int(check_payload_size(payload) / 3.5)
+    estimated_tokens = estimate_payload_tokens(payload)
 
     # Record the size *before* the pruning below rewrites anything. The client
     # still holds this conversation, so this is the number that must reach it
@@ -1720,7 +1725,7 @@ def auto_prune_context(payload: Dict[str, Any], model_id: Optional[str] = None) 
             part["text"] = replacement
 
     if pruned_count:
-        remaining_tokens = int(check_payload_size(payload) / 3.5)
+        remaining_tokens = estimate_payload_tokens(payload)
         logger.info(
             f"[AutoPrune] context ~{estimated_tokens} tokens > {threshold}; "
             f"cleared {pruned_count} old tool result(s), freed ~{removed // 4} tokens "
@@ -1940,6 +1945,18 @@ def build_kiro_payload(
             logger.info(
                 f"Trimmed conversation history: {stats.original_entries} -> {stats.final_entries} messages "
                 f"({stats.original_bytes} -> {stats.final_bytes} bytes)"
+            )
+    else:
+        # Trimming silently drops the oldest turns, which is worse than a large
+        # prompt: the model loses the task statement and re-derives it. It stays
+        # off by default, but an oversized payload must still be visible — the
+        # 1M-window guard is the only backstop after this.
+        payload_size = check_payload_size(payload)
+        if payload_size > KIRO_MAX_PAYLOAD_BYTES:
+            logger.info(
+                f"[Payload] {payload_size} bytes > {KIRO_MAX_PAYLOAD_BYTES} budget "
+                f"(~{estimate_payload_tokens(payload)} tokens, "
+                f"{payload_image_stats(payload)[0]} image(s)); sending untrimmed"
             )
 
     return KiroPayloadResult(payload=payload, tool_documentation=tool_documentation)

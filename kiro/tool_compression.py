@@ -58,14 +58,23 @@ HARD_CAP_BYTES = 200_000
 HARD_CAP_HEAD = 100_000
 HARD_CAP_TAIL = 60_000
 
-# Per-format ceilings (mirrors 9router's RTK defaults).
-MAX_DIFF_HUNK_LINES = 120
+# Per-format ceilings (mirrors 9router's RTK defaults, raised where the old
+# value was measured to cause a re-run).
+#
+# A truncated answer is far more expensive than the tokens it saves: the model
+# cannot conclude anything from a partial list, so it runs the same command
+# again — a full round trip plus the credits for re-sending the whole prompt.
+# Measured on real sessions: 23% of Bash calls were byte-identical repeats, and
+# `git status` alone ran 20 times because the changed-file list was capped at 10.
+MAX_DIFF_HUNK_LINES = 200
 MAX_GIT_LOG_LINES = 200
-GREP_PER_FILE_MAX = 10
-MAX_GREP_LINES = 200
+GREP_PER_FILE_MAX = 30
+MAX_GREP_LINES = 400
 MAX_LISTING_LINES = 200
 MAX_TREE_LINES = 200
 MAX_LOG_LINES = 400
+# Failure lines rescued from the omitted middle of a long build/test log.
+MAX_LOG_KEPT_ERRORS = 60
 
 # Generic long-text fallback (file reads and anything unclassified). Kept very
 # high on purpose: a truncated read is worse than a large prompt, because the
@@ -75,7 +84,10 @@ SMART_TRUNCATE_MIN_LINES = 2000
 SMART_TRUNCATE_HEAD = 1200
 SMART_TRUNCATE_TAIL = 600
 
-STATUS_MAX_FILES = 10
+# A short status is cheap (about 40 bytes per file) and the model needs the whole
+# list to decide what to do; capping it at 10 cost a full re-run of `git status`
+# for every repository with more changes than that.
+STATUS_MAX_FILES = 100
 
 MARKER = "\n[...kiro-gateway: output shortened automatically; re-run the tool for the full result ...]"
 DEDUPE_MARKER = "[kiro-gateway: identical to an earlier tool output; omitted]"
@@ -85,6 +97,12 @@ _TREE_CHARS = ("├", "└", "│", "|--", "`--")
 _LOG_HINT_RE = re.compile(
     r"^\s*(\[?\d{2}:\d{2}:\d{2}|\[?\d{4}-\d{2}-\d{2}|INFO|WARN|ERROR|DEBUG|TRACE|"
     r"Compiling|Finished|Running|test .* \.\.\.|PASS|FAIL|OK\b)",
+    re.IGNORECASE,
+)
+# Lines that carry a verdict the model must not lose when a log is capped.
+_LOG_ERROR_RE = re.compile(
+    r"(error|failed|failure|exception|traceback|fatal|panic|assert|"
+    r"\bFAILED\b|\bERROR\b|✗|\bnot found\b|non-zero exit)",
     re.IGNORECASE,
 )
 _STATUS_FILE_PREFIXES = (
@@ -549,9 +567,29 @@ def _compress_log(text: str) -> str:
 
     head = deduped[: MAX_LOG_LINES // 2]
     tail = deduped[-(MAX_LOG_LINES // 2):]
-    omitted = len(deduped) - len(head) - len(tail)
-    return (
-        "\n".join(head)
-        + f"\n[... {omitted} lines omitted ...]{MARKER}\n"
-        + "\n".join(tail)
-    )
+    middle = deduped[MAX_LOG_LINES // 2 : -(MAX_LOG_LINES // 2)]
+
+    # Failures are what the model needs from a build log, and they are rarely in
+    # the first or last 200 lines of a 2000-line output. Dropping them made the
+    # model re-run the build to see the error again — the single most expensive
+    # possible reaction (a 40s build plus a full prefilled prompt).
+    error_lines = [line for line in middle if _LOG_ERROR_RE.search(line)]
+    omitted = len(middle)
+    parts: List[str] = list(head)
+    if error_lines and len(error_lines) <= MAX_LOG_KEPT_ERRORS:
+        parts.append(
+            f"[... {omitted} lines omitted; {len(error_lines)} error/failure "
+            f"line(s) from the omitted part are kept below ...]"
+        )
+        parts.extend(error_lines)
+    elif error_lines:
+        kept = error_lines[:MAX_LOG_KEPT_ERRORS]
+        parts.append(
+            f"[... {omitted} lines omitted; first {len(kept)} of "
+            f"{len(error_lines)} error/failure line(s) kept below ...]"
+        )
+        parts.extend(kept)
+    else:
+        parts.append(f"[... {omitted} lines omitted ...]{MARKER}")
+    parts.extend(tail)
+    return "\n".join(parts)

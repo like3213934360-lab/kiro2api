@@ -30,7 +30,7 @@ Ported from sametakofficial's payload_guards.py, simplified.
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 
 @dataclass
@@ -46,6 +46,133 @@ class PayloadTrimStats:
 def check_payload_size(payload: Dict[str, Any]) -> int:
     """Return the serialized byte size of the payload as UTF-8 JSON."""
     return len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+
+
+# A screenshot costs roughly this many tokens on Claude models. The exact value
+# depends on resolution, but the order of magnitude is what matters: counting the
+# base64 text instead overstates one 288 KB screenshot as ~84,000 tokens.
+IMAGE_TOKEN_ESTIMATE = 1_500
+
+# Bytes of JSON per token for ordinary text. Measured against Kiro's own count on
+# long sessions; see the module docstring in kiro/request_context.py.
+BYTES_PER_TOKEN = 3.5
+
+
+def _iter_images(payload: Any, _seen: Optional[set] = None):
+    """
+    Yield every image dict found in a Kiro or Anthropic payload.
+
+    Images appear in two shapes:
+
+    * Kiro: ``userInputMessage.images = [{"format": "jpeg", "source": {"bytes": ...}}]``
+    * Anthropic: a content block ``{"type": "image", "source": {"data": ...}}``
+
+    Both are detected so the same estimate works before and after conversion. An
+    image list entry is never counted twice, even when it also carries a ``type``.
+
+    Args:
+        payload: Payload, or any nested value inside one
+        _seen: Identity set used to avoid double counting during recursion
+
+    Yields:
+        Image dictionaries
+    """
+    if _seen is None:
+        _seen = set()
+
+    def _emit(image: Dict[str, Any]):
+        marker = id(image)
+        if marker not in _seen:
+            _seen.add(marker)
+            return image
+        return None
+
+    if isinstance(payload, dict):
+        if payload.get("type") == "image":
+            emitted = _emit(payload)
+            if emitted is not None:
+                yield emitted
+        for key, value in payload.items():
+            if key == "images" and isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        emitted = _emit(item)
+                        if emitted is not None:
+                            yield emitted
+            else:
+                yield from _iter_images(value, _seen)
+    elif isinstance(payload, list):
+        for item in payload:
+            yield from _iter_images(item, _seen)
+
+
+def _image_base64(image: Dict[str, Any]) -> str:
+    """
+    Return the base64 payload of one image, whichever shape it uses.
+
+    Args:
+        image: Image dictionary in Kiro or Anthropic shape
+
+    Returns:
+        Base64 string, or "" when the image carries no data
+    """
+    source = image.get("source")
+    if isinstance(source, dict):
+        for key in ("bytes", "data"):
+            value = source.get(key)
+            if isinstance(value, str):
+                return value
+    for key in ("bytes", "data"):
+        value = image.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
+
+
+def payload_image_stats(payload: Any) -> Tuple[int, int]:
+    """
+    Count images and their base64 size in a payload.
+
+    Args:
+        payload: Kiro payload
+
+    Returns:
+        Tuple of (image count, total base64 characters)
+    """
+    count = 0
+    total = 0
+    for image in _iter_images(payload):
+        count += 1
+        total += len(_image_base64(image))
+    return count, total
+
+
+def estimate_payload_tokens(
+    payload: Dict[str, Any],
+    bytes_per_token: float = BYTES_PER_TOKEN,
+    image_tokens: int = IMAGE_TOKEN_ESTIMATE,
+) -> int:
+    """
+    Estimate prompt tokens without letting inline images dominate the number.
+
+    Serialized-bytes / 3.5 is accurate for text and catastrophically wrong for
+    base64: one 288 KB screenshot measures ~84,000 tokens instead of ~1,500, so a
+    session with a handful of screenshots looked like a 1.4M-token conversation
+    and was pruned and summarised on every turn. Image bytes are therefore
+    excluded from the text estimate and each image is charged a fixed cost.
+
+    Args:
+        payload: Kiro payload about to be sent upstream
+        bytes_per_token: Text density of the serialized payload
+        image_tokens: Token cost charged per image
+
+    Returns:
+        Estimated prompt tokens
+    """
+    total_bytes = check_payload_size(payload)
+    image_count, image_bytes = payload_image_stats(payload)
+    text_bytes = max(0, total_bytes - image_bytes)
+    return int(text_bytes / bytes_per_token) + image_count * image_tokens
 
 
 def exceeds_input_window(payload_tokens: int, max_input_tokens: int, reserve_tokens: int = 1024) -> bool:
