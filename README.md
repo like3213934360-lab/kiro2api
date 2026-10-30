@@ -29,8 +29,10 @@
 
 ### 4. 省钱
 - **会话缓存亲和**：同一会话复用固定的 `conversationId`，命中 Kiro 服务端前缀缓存。实测同一段对话三跳的 credit：`0.594 → 0.536 → 0.072`（以前每跳都是 0.59）。
-- 自动裁剪旧工具结果，首 token 超时按上下文自适应。
-- 三个 API 都返回 `usage.credits_used`，日志里打印 `[Credits] <模型>: used=<n>`。
+- **裁剪只在必要时发生**：阈值跟着模型窗口自动算（1M 上下文约 45 万才裁），一次裁到位，之后很多轮都不再改历史。原因见下：改动历史会让前缀缓存整段失效。
+- 实测（haiku，同一会话）：冷启动 0.0357 credits，之后每轮 0.0040 → **命中后约 1/9 价**。
+- 每轮日志打印 `cache=hit/partial/miss`（Kiro 不返回缓存 token 数，这个结论是按 credits 反推的）。
+- 首 token 超时按上下文自适应；三个 API 都返回 `usage.credits_used`。
 
 ### 5. 多账号与额度
 - 账号池 + 熔断 + 失败自动切换。
@@ -155,7 +157,10 @@ curl http://127.0.0.1:8000/v1/messages \
 `./start.sh` 固定 8000；要换端口用 `python main.py --port 9000`，同时客户端地址也要改。
 
 **6. 日志在哪**
-`server.log`（脚本启动时）或终端输出；调试明细在 `debug_logs/`。
+`server.log`（脚本启动时）或终端输出；调试明细在 `debug_logs/`。每轮请求会打印一行 `[Usage] model=..., in=..., cache=hit (0.11x), credits=...`。
+
+**7. 为什么有时候 `cache=unknown`**
+Kiro 不返回缓存 token 计数，命中与否只能按 credits 反推。进程刚启动、或某个模型还没见过「冷启动那一轮」时，没有基准价，会显示 `unknown`；跑几轮后会自动校准（学习到的基准价存在 `cache_meter.json`，重启不丢）。
 
 ---
 
