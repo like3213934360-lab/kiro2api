@@ -22,6 +22,7 @@ Design choices:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -99,25 +100,56 @@ Omit:
 Return only the summary, in plain text, at most 1500 words."""
 
 
-_CACHE: Dict[str, Tuple[float, str]] = {}
+# key -> (created_at, summary, marker of the last message the summary covers)
+_CACHE: Dict[str, Tuple[float, str, str]] = {}
 
 
-def _cache_get(key: str) -> Optional[str]:
+def _message_marker(message: Any) -> str:
+    """
+    Stable fingerprint of one message, used to locate the summary boundary.
+
+    Args:
+        message: Anthropic message object or dict
+
+    Returns:
+        Short hex digest of role plus content
+    """
+    role = getattr(message, "role", None)
+    content = getattr(message, "content", None)
+    if role is None and isinstance(message, dict):
+        role = message.get("role")
+        content = message.get("content")
+    encoded = json.dumps(
+        [role, content], ensure_ascii=False, default=str, sort_keys=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _cache_get(key: str) -> Optional[Tuple[str, str]]:
+    """
+    Read a cached summary.
+
+    Args:
+        key: Conversation id
+
+    Returns:
+        Tuple of (summary, covered_marker), or None when absent/expired
+    """
     entry = _CACHE.get(key)
     if not entry:
         return None
-    created, summary = entry
+    created, summary, covered = entry
     if time.time() - created > SUMMARY_CACHE_TTL_SECONDS:
         _CACHE.pop(key, None)
         return None
-    return summary
+    return summary, covered
 
 
-def _cache_set(key: str, summary: str) -> None:
+def _cache_set(key: str, summary: str, covered: str) -> None:
     if len(_CACHE) >= SUMMARY_CACHE_MAX_ENTRIES:
         oldest = min(_CACHE, key=lambda k: _CACHE[k][0])
         _CACHE.pop(oldest, None)
-    _CACHE[key] = (time.time(), summary)
+    _CACHE[key] = (time.time(), summary, covered)
 
 
 def _summarizer_excerpt(text: str, limit: int) -> str:
@@ -311,7 +343,36 @@ async def maybe_compact_request(
         return None
     old_messages, recent_messages = split
 
-    summary = _cache_get(conversation_id)
+    summary: Optional[str] = None
+    carried: List[Any] = []
+    cached = _cache_get(conversation_id)
+    if cached:
+        cached_summary, covered = cached
+        # The cached summary covers everything up to `covered`. Messages that
+        # arrived after it are new "old" messages: they are no longer in the
+        # recent window, and the summary cannot describe them. Dropping them
+        # silently hid up to ten minutes of work from the model, which then
+        # repeated it. Carry them verbatim between the summary and the recent
+        # block instead of paying for another summarisation call.
+        boundary = None
+        for index in range(len(old_messages) - 1, -1, -1):
+            if _message_marker(old_messages[index]) == covered:
+                boundary = index
+                break
+        if boundary is not None:
+            summary = cached_summary
+            carried = old_messages[boundary + 1 :]
+            if carried:
+                logger.debug(
+                    f"[AutoCompact] summary covers {boundary + 1}/{len(old_messages)} "
+                    f"old message(s); carrying {len(carried)} unsummarised"
+                )
+        else:
+            logger.debug(
+                "[AutoCompact] cached summary no longer aligns with the history; "
+                "summarising again"
+            )
+
     if not summary:
         summary = await _summarize(
             old_messages,
@@ -323,16 +384,14 @@ async def maybe_compact_request(
         )
         if not summary:
             return None
-        _cache_set(conversation_id, summary)
+        _cache_set(conversation_id, summary, _message_marker(old_messages[-1]))
         logger.info(
             f"[AutoCompact] summarized {len(old_messages)} old message(s) "
             f"for conversation {conversation_id[:16]}..."
         )
-    else:
-        logger.debug("[AutoCompact] reusing cached conversation summary")
 
     compacted = request_data.model_copy(deep=True)
-    compacted.messages = recent_messages
+    compacted.messages = list(carried) + recent_messages
     compacted.system = _append_summary_to_system(
         getattr(request_data, "system", None), summary
     )

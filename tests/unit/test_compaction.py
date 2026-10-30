@@ -271,3 +271,106 @@ class TestSummarizerTranscript:
 
         assert "[FAILED]" in transcript
         assert "build failed" in transcript
+
+
+class TestUnsummarisedMessagesAreCarried:
+    """
+    A cached summary must not swallow the turns that arrived after it.
+
+    The summary covers everything older than the recent window. While it is
+    cached, newly aged-out messages belong to neither the summary nor the recent
+    block, so they disappeared from the model's view for up to the cache TTL
+    (ten minutes) — and the model repeated that work.
+    """
+
+    @staticmethod
+    async def _compact(request, conversation_id, monkeypatch):
+        return await compaction.maybe_compact_request(
+            request,
+            auth_manager=object(),
+            conversation_id=conversation_id,
+            profile_arn="",
+            shared_client=None,
+            estimated_tokens=500_000,
+            threshold_tokens=300_000,
+        )
+
+    @pytest.mark.asyncio
+    async def test_newly_aged_out_messages_are_kept(self, monkeypatch):
+        """
+        What it does: Compacts a 14-message request, then an 18-message one.
+        Purpose: Messages 6-9 aged out between the two calls; they must still
+                 reach the model, without a second summarisation call.
+        """
+        calls = {"count": 0}
+
+        async def fake_summarize(*args, **kwargs):
+            calls["count"] += 1
+            return "SUMMARY"
+
+        monkeypatch.setattr(compaction, "_summarize", fake_summarize)
+
+        first = await self._compact(make_request(14), "conv-carry", monkeypatch)
+        assert first is not None
+        assert len(first.messages) == 8          # summary + last 8
+
+        second = await self._compact(make_request(18), "conv-carry", monkeypatch)
+        assert second is not None
+        contents = [m.content for m in second.messages]
+        print(f"carried block starts at: {contents[0]!r}, total={len(contents)}")
+
+        assert calls["count"] == 1, "the cached summary should be reused"
+        assert contents[0] == "message 6"        # first message the summary missed
+        assert contents[:4] == ["message 6", "message 7", "message 8", "message 9"]
+        assert contents[-1] == "message 17"
+        assert "SUMMARY" in second.system
+
+    @pytest.mark.asyncio
+    async def test_summarises_again_when_the_history_no_longer_aligns(self, monkeypatch):
+        """
+        What it does: Compacts, then compacts a request with rewritten content.
+        Purpose: A client-side compaction or edit removes the covered message; the
+                 stale summary must not be applied to a different history.
+        """
+        calls = {"count": 0}
+
+        async def fake_summarize(*args, **kwargs):
+            calls["count"] += 1
+            return f"SUMMARY-{calls['count']}"
+
+        monkeypatch.setattr(compaction, "_summarize", fake_summarize)
+
+        await self._compact(make_request(14), "conv-realigned", monkeypatch)
+
+        rewritten = make_request(18)
+        for i, message in enumerate(rewritten.messages):
+            message.content = f"rewritten {i}"
+
+        second = await self._compact(rewritten, "conv-realigned", monkeypatch)
+
+        assert second is not None
+        assert calls["count"] == 2
+        assert "SUMMARY-2" in second.system
+        # Nothing is carried when the boundary cannot be located.
+        assert len(second.messages) == 8
+
+    @pytest.mark.asyncio
+    async def test_unchanged_history_still_reuses_the_summary(self, monkeypatch):
+        """
+        What it does: Compacts the same request twice.
+        Purpose: The boundary check must not defeat the cache it relies on.
+        """
+        calls = {"count": 0}
+
+        async def fake_summarize(*args, **kwargs):
+            calls["count"] += 1
+            return "SUMMARY"
+
+        monkeypatch.setattr(compaction, "_summarize", fake_summarize)
+        request = make_request(14)
+
+        await self._compact(request, "conv-same", monkeypatch)
+        second = await self._compact(request, "conv-same", monkeypatch)
+
+        assert calls["count"] == 1
+        assert len(second.messages) == 8
