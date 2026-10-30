@@ -45,6 +45,9 @@ from kiro.config import (
     FAKE_REASONING_BUDGET_CAP,
     KIRO_MAX_PAYLOAD_BYTES,
     AUTO_TRIM_PAYLOAD,
+    AUTO_CONTEXT_PRUNE_RATIO,
+    AUTO_CONTEXT_PRUNE_FALLBACK_TOKENS,
+    model_max_input_tokens,
 )
 from kiro.payload_guards import check_payload_size, trim_payload_to_limit
 
@@ -68,11 +71,14 @@ EMPTY_CONTENT_PLACEHOLDER = "."
 #
 # Agent sessions (Claude Code and similar) re-send the whole conversation on
 # every tool call. Old command/file outputs dominate that prompt and make the
-# upstream prefill slower on every turn. Once the payload exceeds this token
-# estimate, older tool results are shortened (first/last chunk kept) while the
-# most recent ones stay intact, so the model still has the context it is
-# actively working with.
-AUTO_CONTEXT_PRUNE_TOKENS = 220_000
+# upstream prefill slower on every turn. When the payload approaches the
+# model's input window, older tool results are shortened (first/last chunk kept)
+# while the most recent ones stay intact.
+#
+# The threshold scales with the model window (see AUTO_CONTEXT_PRUNE_RATIO in
+# kiro/config.py) and pruning is intentionally rare: rewriting history breaks
+# Kiro's prefix cache for every token after the edit, so it must happen as
+# seldom as possible rather than a little on every turn.
 AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS = 8
 AUTO_PRUNE_PREVIEW_CHARS = 300
 AUTO_PRUNE_MARKER = (
@@ -1578,7 +1584,27 @@ def build_kiro_history(messages: List[UnifiedMessage], model_id: str) -> List[Di
 # Main Payload Building
 # ==================================================================================================
 
-def auto_prune_context(payload: Dict[str, Any]) -> int:
+def auto_prune_threshold(model_id: Optional[str] = None) -> int:
+    """
+    Token estimate at which automatic context pruning starts.
+
+    Scaling with the model window keeps small-context models safe while letting
+    large-context models (1M) run far longer before history is rewritten, which
+    is what keeps Kiro's prefix cache warm.
+
+    Args:
+        model_id: Model id from the payload (may carry an effort suffix)
+
+    Returns:
+        Threshold in estimated tokens
+    """
+    limit = model_max_input_tokens(model_id)
+    if not limit:
+        return AUTO_CONTEXT_PRUNE_FALLBACK_TOKENS
+    return max(1, int(limit * AUTO_CONTEXT_PRUNE_RATIO))
+
+
+def auto_prune_context(payload: Dict[str, Any], model_id: Optional[str] = None) -> int:
     """
     Shortens old tool results when a conversation grows very large.
 
@@ -1591,6 +1617,8 @@ def auto_prune_context(payload: Dict[str, Any]) -> int:
 
     Args:
         payload: Kiro payload produced by build_kiro_payload()
+        model_id: Model id used for the request, so the threshold can follow the
+            model's input window
 
     Returns:
         Number of characters removed (0 when nothing was pruned)
@@ -1615,8 +1643,9 @@ def auto_prune_context(payload: Dict[str, Any]) -> int:
 
     # Fast estimate: serialized bytes / 3.5 approximates tokens well enough
     # for a pruning decision and avoids running a tokenizer on every turn.
+    threshold = auto_prune_threshold(model_id)
     estimated_tokens = int(check_payload_size(payload) / 3.5)
-    if estimated_tokens <= AUTO_CONTEXT_PRUNE_TOKENS:
+    if estimated_tokens <= threshold:
         return 0
 
     prunable = slots[:-AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS] if len(slots) > AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS else []
@@ -1657,9 +1686,11 @@ def auto_prune_context(payload: Dict[str, Any]) -> int:
             part["text"] = replacement
 
     if pruned_count:
+        remaining_tokens = int(check_payload_size(payload) / 3.5)
         logger.info(
-            f"[AutoPrune] context ~{estimated_tokens} tokens > {AUTO_CONTEXT_PRUNE_TOKENS}; "
-            f"cleared {pruned_count} old tool result(s), freed ~{removed // 4} tokens"
+            f"[AutoPrune] context ~{estimated_tokens} tokens > {threshold}; "
+            f"cleared {pruned_count} old tool result(s), freed ~{removed // 4} tokens "
+            f"(now ~{remaining_tokens}); next prune in ~{max(0, threshold - remaining_tokens)} tokens"
         )
     return removed
 
@@ -1860,7 +1891,7 @@ def build_kiro_payload(
 
     # Automatic context pruning: old tool outputs are shortened once the
     # conversation gets large, keeping the recent turns intact and valid.
-    auto_prune_context(payload)
+    auto_prune_context(payload, model_id)
 
     # Payload size guard — auto-trim if enabled
     if AUTO_TRIM_PAYLOAD:

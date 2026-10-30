@@ -348,6 +348,76 @@ FALLBACK_MODELS: List[Dict[str, Any]] = [
 ]
 
 # ==================================================================================================
+# Automatic Context Pruning
+# ==================================================================================================
+#
+# Old tool results are shortened only when the conversation gets close to the
+# model's input window, and then aggressively enough that the following turns
+# don't need pruning again.
+#
+# Why "rare and deep" instead of "a little every turn": Kiro's prefix cache is
+# keyed on the request bytes, so rewriting one old tool result invalidates every
+# cached token after it. Measured on the live API: turns that rewrote history
+# hit the cache 0% of the time; turns that did not hit roughly 90% of the time
+# and were billed ~10% of the uncached price. Keeping the rewrite rare keeps the
+# cache warm, which matters far more than shaving a few thousand tokens.
+AUTO_CONTEXT_PRUNE_RATIO: float = 0.45
+
+# Threshold used when the model window is unknown (legacy behaviour).
+AUTO_CONTEXT_PRUNE_FALLBACK_TOKENS: int = 220_000
+
+# Suffixes the routers may append to a model name (effort / thinking variants).
+_MODEL_NAME_SUFFIXES: tuple = (
+    "-xhigh",
+    "-thinking",
+    "-medium",
+    "-high",
+    "-low",
+    "-max",
+)
+
+# modelId -> advertised max input tokens (from the built-in catalog).
+_MODEL_INPUT_LIMITS: Dict[str, int] = {
+    model["modelId"]: int((model.get("tokenLimits") or {}).get("maxInputTokens") or 0)
+    for model in FALLBACK_MODELS
+    if (model.get("tokenLimits") or {}).get("maxInputTokens")
+}
+
+
+def model_max_input_tokens(model_id: Optional[str]) -> Optional[int]:
+    """
+    Look up a model's advertised max input tokens.
+
+    Args:
+        model_id: Model id as sent by the client, optionally with an effort or
+            thinking suffix (``claude-opus-5.5-xhigh``) and possibly an alias
+
+    Returns:
+        Max input tokens from the built-in catalog, or None when unknown
+    """
+    name = (model_id or "").strip()
+    if not name:
+        return None
+
+    name = MODEL_ALIASES.get(name, name)
+    for suffix in _MODEL_NAME_SUFFIXES:
+        if name.endswith(suffix) and len(name) > len(suffix):
+            name = name[: -len(suffix)]
+            break
+
+    limit = _MODEL_INPUT_LIMITS.get(name)
+    if limit:
+        return limit
+
+    # Accept dashed/dotted variants (claude-opus-5-5 vs claude-opus-5.5).
+    normalised = name.replace(".", "-")
+    for known, known_limit in _MODEL_INPUT_LIMITS.items():
+        if known.replace(".", "-") == normalised:
+            return known_limit
+    return None
+
+
+# ==================================================================================================
 # Model Cache Settings
 # ==================================================================================================
 

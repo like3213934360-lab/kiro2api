@@ -6842,7 +6842,7 @@ class TestAutoPruneContext:
     def test_shortens_only_old_tool_results(self, monkeypatch):
         import kiro.converters_core as cc
 
-        monkeypatch.setattr(cc, "AUTO_CONTEXT_PRUNE_TOKENS", 1000)
+        monkeypatch.setattr(cc, "auto_prune_threshold", lambda model_id=None: 1000)
         monkeypatch.setattr(cc, "AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS", 2)
         monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_CHARS", 200)
 
@@ -6883,7 +6883,7 @@ class TestAutoPruneContext:
     def test_deduplicates_identical_outputs(self, monkeypatch):
         import kiro.converters_core as cc
 
-        monkeypatch.setattr(cc, "AUTO_CONTEXT_PRUNE_TOKENS", 100)
+        monkeypatch.setattr(cc, "auto_prune_threshold", lambda model_id=None: 100)
         monkeypatch.setattr(cc, "AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS", 1)
 
         same = "duplicate output " * 500
@@ -6918,3 +6918,95 @@ class TestAutoPruneContext:
         before = repr(payload)
         assert auto_prune_context(payload) == 0
         assert repr(payload) == before
+
+    def test_threshold_scales_with_model_window(self):
+        """
+        What it does: Compares the prune threshold for different model windows.
+        Purpose: 1M-context sessions must not be rewritten every turn; small
+                 windows still need protection.
+        """
+        import kiro.converters_core as cc
+
+        big = cc.auto_prune_threshold("claude-opus-5.5")
+        small = cc.auto_prune_threshold("claude-sonnet-4.5")
+        unknown = cc.auto_prune_threshold("some-unknown-model")
+        suffixed = cc.auto_prune_threshold("claude-opus-5.5-xhigh")
+
+        assert big == int(1_000_000 * 0.45)
+        assert small == int(200_000 * 0.45)
+        assert unknown == 220_000
+        assert suffixed == big
+
+    def test_pruning_is_rare_and_hysteretic(self, monkeypatch):
+        """
+        What it does: Prunes once, then runs a second turn without pruning.
+        Purpose: Kiro's prefix cache dies on every rewrite, so pruning must
+                 leave enough headroom to skip the following turns.
+        """
+        import kiro.converters_core as cc
+
+        monkeypatch.setattr(cc, "model_max_input_tokens", lambda model_id: 10_000)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS", 2)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_CHARS", 200)
+
+        def result(tool_id, text):
+            return {"content": [{"text": text}], "status": "success", "toolUseId": tool_id}
+
+        payload = {
+            "conversationState": {
+                "history": [
+                    {"userInputMessage": {"userInputMessageContext": {"toolResults": [
+                        result(f"old-{i}", f"result-{i}-" + "X" * 4000)
+                    ]}}}
+                    for i in range(6)
+                ],
+                "currentMessage": {"userInputMessage": {"content": "continue"}},
+            }
+        }
+
+        assert auto_prune_context(payload, "m") > 0
+        pruned_snapshot = repr(payload["conversationState"]["history"])
+
+        # Next turn only appends a message: no new pruning, history untouched.
+        payload["conversationState"]["history"].append(
+            {"userInputMessage": {"content": "next"}}
+        )
+        assert auto_prune_context(payload, "m") == 0
+        pruned_entries = payload["conversationState"]["history"][:-1]
+        assert repr(pruned_entries) == pruned_snapshot
+
+    def test_model_window_controls_when_pruning_starts(self, monkeypatch):
+        """
+        What it does: Uses a small window and a payload sized between thresholds.
+        Purpose: The threshold must come from the model, not a global constant.
+        """
+        import kiro.converters_core as cc
+
+        monkeypatch.setattr(cc, "AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS", 2)
+
+        def result(tool_id, text):
+            return {"content": [{"text": text}], "status": "success", "toolUseId": tool_id}
+
+        payload = {
+            "conversationState": {
+                "history": [
+                    {"userInputMessage": {"userInputMessageContext": {"toolResults": [
+                        result(f"old-{i}", "Y" * 4000)
+                    ]}}}
+                    for i in range(6)
+                ],
+                "currentMessage": {"userInputMessage": {"content": "continue"}},
+            }
+        }
+        estimate = int(cc.check_payload_size(payload) / 3.5)
+
+        monkeypatch.setattr(
+            cc, "model_max_input_tokens", lambda model_id: max(10_000, estimate * 4)
+        )
+        assert auto_prune_context(payload, "big-window") == 0
+
+        monkeypatch.setattr(
+            cc, "model_max_input_tokens", lambda model_id: max(10_000, int(estimate / 1.5))
+        )
+        assert auto_prune_context(payload, "small-window") > 0
+
