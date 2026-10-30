@@ -65,6 +65,7 @@ from kiro.streaming_core import (
     effective_prompt_tokens,
 )
 from kiro.tokenizer import count_tokens, estimate_request_tokens
+from kiro.cache_meter import estimate_cached_prompt_tokens
 from kiro.parsers import parse_bracket_tool_calls, deduplicate_tool_calls
 from kiro.config import (
     FIRST_TOKEN_TIMEOUT,
@@ -1018,14 +1019,35 @@ async def stream_kiro_to_anthropic(
         usage_payload = {
             "output_tokens": output_tokens
         }
-        usage_payload.update(upstream_cache_usage)
-        if credits_used is not None:
-            usage_payload["credits_used"] = credits_used
-        cache_hit = log_usage_summary(
+        observation = log_usage_summary(
             model, model_cache, input_tokens, output_tokens, input_tokens + output_tokens,
             credits_used=credits_used,
             cache_read_tokens=upstream_cache_usage.get("cache_read_input_tokens"),
         )
+        cache_hit = observation.label if observation is not None else None
+
+        # Kiro reports no cache counters, so the cached share is derived from the
+        # charge. Anthropic semantics: input_tokens EXCLUDES cache reads, so the
+        # two fields are split rather than added — the client sums them to size
+        # the context, and reporting both at full value would double it.
+        if not upstream_cache_usage.get("cache_read_input_tokens"):
+            cached_tokens = estimate_cached_prompt_tokens(
+                effective_prompt_tokens(input_tokens), observation
+            )
+            if cached_tokens > 0:
+                upstream_cache_usage = dict(upstream_cache_usage)
+                upstream_cache_usage["cache_read_input_tokens"] = cached_tokens
+                usage_payload["input_tokens"] = max(
+                    0, effective_prompt_tokens(input_tokens) - cached_tokens
+                )
+                logger.debug(
+                    f"[CacheTokens] estimated cache_read={cached_tokens} "
+                    f"input={usage_payload['input_tokens']} "
+                    f"(cache={observation.format() if observation else 'unknown'})"
+                )
+        usage_payload.update(upstream_cache_usage)
+        if credits_used is not None:
+            usage_payload["credits_used"] = credits_used
 
         # Notify usage subscriber (external key quota tracking)
         if on_usage is not None:
@@ -1260,16 +1282,37 @@ async def collect_anthropic_response(
         "input_tokens": effective_prompt_tokens(input_tokens),
         "output_tokens": output_tokens
     }
-    usage_payload.update(upstream_cache_usage)
 
     collected_credits = extract_credits_used(result.usage)
-    if collected_credits is not None:
-        usage_payload["credits_used"] = collected_credits
-    cache_hit = log_usage_summary(
+    observation = log_usage_summary(
         model, model_cache, input_tokens, output_tokens, input_tokens + output_tokens,
         credits_used=collected_credits,
         cache_read_tokens=upstream_cache_usage.get("cache_read_input_tokens"),
     )
+    cache_hit = observation.label if observation is not None else None
+
+    # Kiro reports no cache counters, so the cached share is derived from the
+    # charge. Anthropic semantics: input_tokens EXCLUDES cache reads, so the two
+    # fields are split rather than added — clients sum them to size the context.
+    if not upstream_cache_usage.get("cache_read_input_tokens"):
+        cached_tokens = estimate_cached_prompt_tokens(
+            effective_prompt_tokens(input_tokens), observation
+        )
+        if cached_tokens > 0:
+            upstream_cache_usage = dict(upstream_cache_usage)
+            upstream_cache_usage["cache_read_input_tokens"] = cached_tokens
+            usage_payload["input_tokens"] = max(
+                0, effective_prompt_tokens(input_tokens) - cached_tokens
+            )
+            logger.debug(
+                f"[CacheTokens] estimated cache_read={cached_tokens} "
+                f"input={usage_payload['input_tokens']} "
+                f"(cache={observation.format() if observation else 'unknown'})"
+            )
+    usage_payload.update(upstream_cache_usage)
+
+    if collected_credits is not None:
+        usage_payload["credits_used"] = collected_credits
 
     # Notify usage subscriber (external key quota tracking)
     if on_usage is not None:

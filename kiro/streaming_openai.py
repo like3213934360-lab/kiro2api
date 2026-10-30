@@ -49,6 +49,7 @@ from kiro.config import (
 from kiro.tokenizer import count_tokens, count_message_tokens, count_tools_tokens
 
 # Import from streaming_core - reuse shared parsing logic
+from kiro.cache_meter import estimate_cached_prompt_tokens
 from kiro.streaming_core import (
     parse_kiro_stream,
     FirstTokenTimeoutError,
@@ -477,10 +478,26 @@ async def stream_kiro_to_openai_internal(
         logger.debug(
             f"[UsageDetail] {model}: prompt_source={prompt_source}, total_source={total_source}"
         )
-        cache_hit = log_usage_summary(
+        observation = log_usage_summary(
             model, model_cache, prompt_tokens, completion_tokens, total_tokens,
             credits_used=credits_used,
         )
+        cache_hit = observation.label if observation is not None else None
+
+        # Kiro reports no cache counters, so derive the cached share from the
+        # charge. OpenAI semantics: prompt_tokens INCLUDES cached tokens, so the
+        # details are added without touching the total.
+        cached_tokens = estimate_cached_prompt_tokens(
+            effective_prompt_tokens(prompt_tokens), observation
+        )
+        if cached_tokens > 0:
+            final_chunk["usage"]["prompt_tokens_details"] = {
+                "cached_tokens": cached_tokens
+            }
+            logger.debug(
+                f"[CacheTokens] estimated cached_tokens={cached_tokens} "
+                f"(cache={observation.format() if observation else 'unknown'})"
+            )
 
         # Notify usage subscriber (external key quota tracking) before the final chunk
         if on_usage is not None:

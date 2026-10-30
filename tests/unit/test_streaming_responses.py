@@ -517,3 +517,71 @@ class TestResponsesStreaming:
         parsed = await _run(events, monkeypatch)
         seqs = [d["sequence_number"] for _, d in parsed]
         assert seqs == list(range(len(seqs)))
+
+
+class TestCacheUsageEstimate:
+    """
+    Responses reports cached prompt tokens inside input_tokens.
+
+    Kiro sends no counters, so the reused share is derived from the charge. The
+    figure is added as a detail: input_tokens must not shrink, or clients would
+    size the context wrong.
+    """
+
+    @staticmethod
+    async def _usage(observation, monkeypatch):
+        from kiro.cache_meter import CacheObservation  # noqa: F401
+
+        monkeypatch.setattr(
+            streaming_responses, "log_usage_summary", lambda *a, **k: observation
+        )
+        events = [
+            KiroEvent(type="content", content="hi"),
+            KiroEvent(type="context_usage", context_usage_percentage=2.0),
+        ]
+        parsed = await _run(events, monkeypatch)
+        _, completed = [e for e in parsed if e[0] == "response.completed"][0]
+        return completed["response"]["usage"]
+
+    @pytest.mark.asyncio
+    async def test_full_hit_adds_cached_tokens_without_shrinking_input(self, monkeypatch):
+        """
+        What it does: Compares a full hit with a cold request.
+        Purpose: input_tokens stays the whole prompt while the cached detail
+                 appears, matching OpenAI/Responses semantics.
+        """
+        from kiro.cache_meter import CacheObservation
+
+        miss = await self._usage(CacheObservation("miss", 1.0), monkeypatch)
+        hit = await self._usage(CacheObservation("hit", 0.10), monkeypatch)
+
+        print(f"hit usage={hit}")
+        assert "input_tokens_details" not in miss
+        assert hit["input_tokens"] == miss["input_tokens"]
+        assert hit["input_tokens_details"]["cached_tokens"] == hit["input_tokens"]
+        assert hit["total_tokens"] == miss["total_tokens"]
+
+    @pytest.mark.asyncio
+    async def test_partial_hit_reports_the_reused_share_only(self, monkeypatch):
+        """
+        What it does: Reports a half-cached prompt.
+        Purpose: The detail must not swallow the whole prompt.
+        """
+        from kiro.cache_meter import CacheObservation
+
+        partial = await self._usage(CacheObservation("partial", 0.55), monkeypatch)
+
+        cached = partial["input_tokens_details"]["cached_tokens"]
+        assert 0 < cached < partial["input_tokens"]
+
+    @pytest.mark.asyncio
+    async def test_miss_reports_no_details(self, monkeypatch):
+        """
+        What it does: Reports a cold request.
+        Purpose: No evidence of reuse means no cached counter.
+        """
+        from kiro.cache_meter import CacheObservation
+
+        miss = await self._usage(CacheObservation("miss", 1.0), monkeypatch)
+
+        assert "input_tokens_details" not in miss

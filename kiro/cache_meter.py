@@ -77,6 +77,47 @@ class CacheObservation:
         return f"{self.label} ({self.ratio:.2f}x)"
 
 
+# Kiro bills a cache hit at roughly this fraction of the uncached input price
+# (measured: turns that reuse the prefix are billed ~10% of a cold prefill).
+CACHE_READ_PRICE_FRACTION = 0.10
+
+
+def estimate_cached_prompt_tokens(
+    prompt_tokens: int, observation: Optional[CacheObservation]
+) -> int:
+    """
+    Estimate how many prompt tokens were served from the prefix cache.
+
+    Kiro reports no token-level counters, so the split is derived from the
+    charge ratio. If a fraction ``f`` of the prompt is cached and cached tokens
+    cost ``CACHE_READ_PRICE_FRACTION`` of an uncached one, the ratio is
+
+        ratio = f * 0.10 + (1 - f) * 1.0
+
+    which inverts to ``f = (1 - ratio) / 0.9``. The estimate is clamped to the
+    prompt size and only produced for verdicts that actually indicate reuse: a
+    ``miss`` is billed at the uncached price, and fabricating a small hit from
+    the noise around it would overstate the cache. Cross-account and
+    cross-conversation reuse is real, because Kiro's cache is content-addressed.
+
+    Args:
+        prompt_tokens: Prompt size reported for the request
+        observation: Cache verdict for the request
+
+    Returns:
+        Estimated cached prompt tokens (0 when nothing was reused)
+    """
+    if not prompt_tokens or prompt_tokens <= 0:
+        return 0
+    if observation is None or observation.ratio is None:
+        return 0
+    if observation.label not in ("hit", "partial"):
+        return 0
+    fraction = (1.0 - observation.ratio) / (1.0 - CACHE_READ_PRICE_FRACTION)
+    fraction = min(1.0, max(0.0, fraction))
+    return int(round(prompt_tokens * fraction))
+
+
 class CacheMeter:
     """
     Rolling per-model cache-hit estimator with a persisted uncached price.

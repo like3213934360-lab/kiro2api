@@ -323,3 +323,99 @@ class TestPeakMerging:
         meter.classify("m", 40_000, 10, 5.0)  # 1.25e-4, above the seed
 
         assert json.loads(state.read_text())["peaks"]["m"] == pytest.approx(5.0 / 40_070)
+
+
+class TestCachedTokenEstimate:
+    """
+    Turning the charge ratio into a cached-token count.
+
+    Clients display a cache hit rate from token counters, but Kiro only reports
+    a charge. The conversion must be conservative: a miss never claims reuse,
+    and a hit never exceeds the prompt.
+    """
+
+    @staticmethod
+    def _obs(label, ratio):
+        from kiro.cache_meter import CacheObservation
+
+        return CacheObservation(label, ratio)
+
+    def test_full_hit_counts_the_whole_prompt(self):
+        """
+        What it does: Classifies a hit billed at the cache-read price.
+        Purpose: A fully reused prefix must report every prompt token as cached.
+        """
+        from kiro.cache_meter import estimate_cached_prompt_tokens
+
+        cached = estimate_cached_prompt_tokens(40_000, self._obs("hit", 0.10))
+
+        assert cached == 40_000
+        print(f"✓ 40,000 tokens fully cached (got {cached})")
+
+    def test_partial_hit_splits_by_price(self):
+        """
+        What it does: Classifies a request billed at 55% of the uncached price.
+        Purpose: Half-cached prompts must report half the tokens, so the client's
+                 hit rate tracks what was actually reused.
+        """
+        from kiro.cache_meter import estimate_cached_prompt_tokens
+
+        cached = estimate_cached_prompt_tokens(40_000, self._obs("partial", 0.55))
+
+        assert cached == 20_000
+
+    def test_miss_never_claims_reuse(self):
+        """
+        What it does: Classifies a request billed at the uncached price.
+        Purpose: Reporting a small "hit" from billing noise would overstate the
+                 cache; a miss must report zero.
+        """
+        from kiro.cache_meter import estimate_cached_prompt_tokens
+
+        assert estimate_cached_prompt_tokens(40_000, self._obs("miss", 0.98)) == 0
+        assert estimate_cached_prompt_tokens(40_000, self._obs("miss", 1.30)) == 0
+
+    def test_unknown_reports_nothing(self):
+        """
+        What it does: Passes an unclassified request.
+        Purpose: No evidence means no claim — the field stays absent.
+        """
+        from kiro.cache_meter import estimate_cached_prompt_tokens
+
+        assert estimate_cached_prompt_tokens(40_000, self._obs("unknown", None)) == 0
+        assert estimate_cached_prompt_tokens(40_000, None) == 0
+
+    def test_clamps_a_ratio_below_the_cache_price(self):
+        """
+        What it does: Classifies a hit cheaper than the expected cache price.
+        Purpose: The derived fraction can exceed 1 when credits are discounted;
+                 cached tokens must never exceed the prompt.
+        """
+        from kiro.cache_meter import estimate_cached_prompt_tokens
+
+        assert estimate_cached_prompt_tokens(40_000, self._obs("hit", 0.0)) == 40_000
+
+    @pytest.mark.parametrize("prompt", [0, -1, -50_000])
+    def test_non_positive_prompt_yields_nothing(self, prompt):
+        """
+        What it does: Passes an empty or invalid prompt size.
+        Purpose: Defensive guard — never emit a negative token count.
+        """
+        from kiro.cache_meter import estimate_cached_prompt_tokens
+
+        assert estimate_cached_prompt_tokens(prompt, self._obs("hit", 0.10)) == 0
+
+    def test_split_preserves_the_prompt_total(self):
+        """
+        What it does: Splits a partial hit and re-adds the parts.
+        Purpose: Anthropic clients size the context by summing input and cache
+                 reads, so the split must not change the conversation size.
+        """
+        from kiro.cache_meter import estimate_cached_prompt_tokens
+
+        prompt = 137_000
+        cached = estimate_cached_prompt_tokens(prompt, self._obs("partial", 0.72))
+        fresh = prompt - cached
+
+        assert 0 < cached < prompt
+        assert fresh + cached == prompt

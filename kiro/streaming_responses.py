@@ -52,6 +52,7 @@ from kiro.config import (
 )
 from kiro.tokenizer import count_tokens, count_message_tokens, count_tools_tokens
 
+from kiro.cache_meter import estimate_cached_prompt_tokens
 from kiro.streaming_core import (
     parse_kiro_stream,
     FirstTokenTimeoutError,
@@ -585,12 +586,26 @@ async def stream_kiro_to_responses_internal(
             f"cache_usage={'available' if 'input_tokens_details' in usage else 'unavailable'}"
         )
         cache_read_tokens = usage.get("input_tokens_details", {}).get("cached_tokens")
-        cache_hit = log_usage_summary(
+        observation = log_usage_summary(
             model, model_cache, prompt_tokens, completion_tokens, total_tokens,
             credits_used=credits_used, cache_read_tokens=cache_read_tokens,
         )
+        cache_hit = observation.label if observation is not None else None
         if cache_hit:
             usage["cache_hit"] = cache_hit
+
+        # Kiro reports no cache counters, so derive the cached share from the
+        # charge. Responses semantics: input_tokens INCLUDES cached tokens.
+        if not cache_read_tokens:
+            cached_tokens = estimate_cached_prompt_tokens(
+                effective_prompt_tokens(prompt_tokens), observation
+            )
+            if cached_tokens > 0:
+                usage.setdefault("input_tokens_details", {})["cached_tokens"] = cached_tokens
+                logger.debug(
+                    f"[CacheTokens] estimated cached_tokens={cached_tokens} "
+                    f"(cache={observation.format() if observation else 'unknown'})"
+                )
 
         # Notify usage subscriber (external key quota tracking)
         if on_usage is not None:
@@ -819,13 +834,28 @@ async def collect_responses_response(
     if credits_used is not None:
         usage["credits_used"] = credits_used
 
-    cache_hit = log_usage_summary(
+    cache_hit = None
+    observation = log_usage_summary(
         model, model_cache, prompt_tokens, completion_tokens, total_tokens,
         credits_used=credits_used,
         cache_read_tokens=usage.get("input_tokens_details", {}).get("cached_tokens"),
     )
+    cache_hit = observation.label if observation is not None else None
     if cache_hit:
         usage["cache_hit"] = cache_hit
+
+    # Kiro reports no cache counters, so derive the cached share from the charge.
+    # Responses semantics: input_tokens INCLUDES cached tokens.
+    if not usage.get("input_tokens_details", {}).get("cached_tokens"):
+        cached_tokens = estimate_cached_prompt_tokens(
+            effective_prompt_tokens(prompt_tokens), observation
+        )
+        if cached_tokens > 0:
+            usage.setdefault("input_tokens_details", {})["cached_tokens"] = cached_tokens
+            logger.debug(
+                f"[CacheTokens] estimated cached_tokens={cached_tokens} "
+                f"(cache={observation.format() if observation else 'unknown'})"
+            )
 
     # Notify usage subscriber (external key quota tracking)
     if on_usage is not None:

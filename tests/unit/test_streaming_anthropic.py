@@ -2118,3 +2118,130 @@ class TestAdaptiveFirstTokenTimeout:
 
         assert captured["timeout"] > 15.0
         assert captured["timeout"] <= 90.0
+
+
+# ==================================================================================================
+# Tests for cache usage reported to Anthropic clients
+# ==================================================================================================
+
+PROMPT_TOKENS = 40_000
+
+
+class TestCacheUsageSplit:
+    """
+    Anthropic usage separates cached from fresh input tokens.
+
+    Kiro reports no counters, so the split is derived from the charge. The
+    invariant that matters: input_tokens + cache_read_input_tokens must equal the
+    prompt size reported in message_start, otherwise the client's context gauge
+    and auto-compaction thresholds move.
+    """
+
+    @staticmethod
+    async def _usage(observation, mock_response, mock_model_cache, mock_auth_manager):
+        """Run one stream and return (message_start usage, message_delta usage)."""
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hi")
+            yield KiroEvent(type="context_usage", context_usage_percentage=20.0)
+
+        # Pin the prompt size so the split is checkable exactly: context_usage
+        # normally derives it from Kiro's percentage of the model window.
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch(
+                'kiro.streaming_anthropic.calculate_tokens_from_context_usage',
+                return_value=(PROMPT_TOKENS, PROMPT_TOKENS, "subtraction", "API Kiro"),
+            ):
+                with patch(
+                    'kiro.streaming_anthropic.log_usage_summary',
+                    return_value=observation,
+                ):
+                    events = [
+                        event async for event in stream_kiro_to_anthropic(
+                            mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                        )
+                    ]
+
+        start = [e for e in events if "event: message_start" in e][0]
+        delta = [e for e in events if "event: message_delta" in e][0]
+        start_usage = json.loads(start.split("data: ", 1)[1])["message"]["usage"]
+        delta_usage = json.loads(delta.split("data: ", 1)[1])["usage"]
+        return start_usage, delta_usage
+
+    @pytest.mark.asyncio
+    async def test_full_hit_moves_the_whole_prompt_into_cache_read(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Reports a full cache hit and compares with a cold request.
+        Purpose: Anthropic counts input_tokens and cache reads separately. Adding
+                 the cache fields on top of the full prompt would make every
+                 client believe its context doubled and stall auto-compaction.
+        """
+        from kiro.cache_meter import CacheObservation
+
+        _, miss = await self._usage(
+            CacheObservation("miss", 1.0), mock_response, mock_model_cache, mock_auth_manager
+        )
+        _, hit = await self._usage(
+            CacheObservation("hit", 0.10), mock_response, mock_model_cache, mock_auth_manager
+        )
+
+        print(f"hit usage={hit}")
+
+        assert hit["cache_read_input_tokens"] == PROMPT_TOKENS
+        assert hit["input_tokens"] == 0
+        assert hit["input_tokens"] + hit["cache_read_input_tokens"] == PROMPT_TOKENS
+        assert "cache_read_input_tokens" not in miss
+
+    @pytest.mark.asyncio
+    async def test_partial_hit_splits_the_prompt(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Reports a half-cached prompt.
+        Purpose: Partial reuse must be visible as a ratio, not rounded to 0 or 100%.
+        """
+        from kiro.cache_meter import CacheObservation
+
+        _, partial = await self._usage(
+            CacheObservation("partial", 0.55), mock_response, mock_model_cache, mock_auth_manager
+        )
+
+        # Half the prompt was reused, so the halves must add back up exactly.
+        assert partial["cache_read_input_tokens"] == PROMPT_TOKENS // 2
+        assert partial["input_tokens"] == PROMPT_TOKENS // 2
+        assert partial["input_tokens"] + partial["cache_read_input_tokens"] == PROMPT_TOKENS
+
+    @pytest.mark.asyncio
+    async def test_miss_reports_no_cache_fields(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Reports a request billed at the uncached price.
+        Purpose: A cold prefill must not advertise a cache hit.
+        """
+        from kiro.cache_meter import CacheObservation
+
+        _, miss = await self._usage(
+            CacheObservation("miss", 1.0), mock_response, mock_model_cache, mock_auth_manager
+        )
+
+        assert "cache_read_input_tokens" not in miss
+
+    @pytest.mark.asyncio
+    async def test_unknown_verdict_reports_no_cache_fields(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Reports a request the meter could not classify.
+        Purpose: No evidence, no claim — the field stays absent rather than
+                 defaulting to zero, which clients read as a real measurement.
+        """
+        from kiro.cache_meter import CacheObservation
+
+        _, usage = await self._usage(
+            CacheObservation("unknown", None), mock_response, mock_model_cache, mock_auth_manager
+        )
+
+        assert "cache_read_input_tokens" not in usage

@@ -47,7 +47,7 @@ from kiro.config import (
     FAKE_REASONING_HANDLING,
 )
 from kiro.thinking_parser import ThinkingParser
-from kiro.cache_meter import cache_meter
+from kiro.cache_meter import CacheObservation, cache_meter
 from kiro.request_context import get_client_prompt_tokens, get_payload_estimate
 
 if TYPE_CHECKING:
@@ -445,7 +445,7 @@ def log_usage_summary(
     total_tokens: int,
     credits_used: Optional[float] = None,
     cache_read_tokens: Optional[int] = None,
-) -> Optional[str]:
+) -> Optional[CacheObservation]:
     """
     Logs one usage summary line per request.
 
@@ -469,7 +469,8 @@ def log_usage_summary(
         cache_read_tokens: Cache-read tokens, only when upstream reported them
 
     Returns:
-        Cache verdict (``hit`` / ``partial`` / ``miss`` / ``unknown``), if any
+        Cache verdict for the request, or None when Kiro reported no charge.
+        Callers use ``label`` for logs and the ratio to split cached tokens.
     """
     parts = [
         f"model={model}",
@@ -494,7 +495,7 @@ def log_usage_summary(
         parts.append(f"credits={credits_used:g}")
 
     logger.info("[Usage] " + ", ".join(parts))
-    return observation.label
+    return observation
 
 
 def extract_credits_used(metering_data: Any) -> Optional[float]:

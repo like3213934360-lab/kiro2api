@@ -2150,3 +2150,51 @@ class TestEffectivePromptTokens:
         assert effective_prompt_tokens(80_000) == 80_000
         self._clear()
 
+
+
+class TestLogUsageSummaryReturnsObservation:
+    """The usage line must hand back the verdict, not only its label."""
+
+    def test_returns_the_full_observation(self, monkeypatch):
+        """
+        What it does: Calls the usage summary with a stubbed meter.
+        Purpose: Callers need the price ratio to convert a verdict into cached
+                 token counts for the client; returning only the label made that
+                 impossible and left cache counters empty everywhere.
+        """
+        import kiro.streaming_core as sc
+        from kiro.cache_meter import CacheObservation
+
+        class _Meter:
+            def classify(self, *args, **kwargs):
+                return CacheObservation("hit", 0.12)
+
+        monkeypatch.setattr(sc, "cache_meter", _Meter())
+
+        observation = sc.log_usage_summary(
+            "claude-sonnet-4.5", None, 120_000, 40, 120_040, credits_used=0.5
+        )
+
+        assert isinstance(observation, CacheObservation)
+        assert observation.label == "hit"
+        assert observation.ratio == 0.12
+
+    def test_missing_charge_still_returns_a_verdict(self, monkeypatch):
+        """
+        What it does: Omits the credit amount.
+        Purpose: The meter reports 'unknown' rather than None; callers rely on a
+                 stable return type to decide whether to emit cache fields.
+        """
+        import kiro.streaming_core as sc
+        from kiro.cache_meter import CacheObservation
+
+        class _Meter:
+            def classify(self, *args, **kwargs):
+                return CacheObservation("unknown", None)
+
+        monkeypatch.setattr(sc, "cache_meter", _Meter())
+
+        observation = sc.log_usage_summary("m", None, 1000, 10, 1010)
+
+        assert isinstance(observation, CacheObservation)
+        assert observation.label == "unknown"

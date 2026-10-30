@@ -1564,3 +1564,95 @@ class TestStreamingOpenaiKeepalive:
         assert OPENAI_KEEPALIVE_COMMENT not in chunks
         assert any("tool_calls" in c for c in chunks)
         print("✓ No keepalive comments when disabled")
+
+
+# ==================================================================================================
+# Tests for cache usage reported to OpenAI clients
+# ==================================================================================================
+
+class TestCacheUsageReporting:
+    """
+    OpenAI reports cached prompt tokens as a detail of prompt_tokens.
+
+    prompt_tokens always counts the whole prompt, so the cached figure is added
+    alongside it — never subtracted — or clients would think the prompt shrank.
+    """
+
+    @staticmethod
+    async def _final_usage(observation, mock_http_client, mock_response, mock_model_cache, mock_auth_manager):
+        import json as _json
+        from kiro.cache_meter import CacheObservation  # noqa: F401
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hello")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                with patch('kiro.streaming_openai.log_usage_summary', return_value=observation):
+                    chunks = [
+                        chunk async for chunk in stream_kiro_to_openai(
+                            mock_http_client, mock_response, "claude-sonnet-4",
+                            mock_model_cache, mock_auth_manager
+                        )
+                    ]
+
+        payload = [c for c in chunks if '"usage"' in c and "[DONE]" not in c][-1]
+        return _json.loads(payload[len("data: "):].strip())["usage"]
+
+    @pytest.mark.asyncio
+    async def test_full_hit_reports_cached_tokens_without_shrinking_the_prompt(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Reports a full cache hit and a cold request.
+        Purpose: prompt_tokens must stay identical in both cases while the cached
+                 detail appears — OpenAI counts cached tokens inside prompt_tokens.
+        """
+        from kiro.cache_meter import CacheObservation
+
+        miss = await self._final_usage(
+            CacheObservation("miss", 1.0), mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+        )
+        hit = await self._final_usage(
+            CacheObservation("hit", 0.10), mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+        )
+
+        print(f"hit usage={hit}")
+        assert "prompt_tokens_details" not in miss
+        assert hit["prompt_tokens"] == miss["prompt_tokens"]
+        assert hit["prompt_tokens_details"]["cached_tokens"] == hit["prompt_tokens"]
+        assert hit["total_tokens"] == miss["total_tokens"]
+
+    @pytest.mark.asyncio
+    async def test_partial_hit_reports_only_the_reused_share(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Reports a half-cached prompt.
+        Purpose: The detail must track the reused share, not the whole prompt.
+        """
+        from kiro.cache_meter import CacheObservation
+
+        partial = await self._final_usage(
+            CacheObservation("partial", 0.55), mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+        )
+
+        cached = partial["prompt_tokens_details"]["cached_tokens"]
+        assert 0 < cached < partial["prompt_tokens"]
+
+    @pytest.mark.asyncio
+    async def test_miss_reports_no_details(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Reports a cold request.
+        Purpose: A cold prefill must not advertise a cache hit.
+        """
+        from kiro.cache_meter import CacheObservation
+
+        miss = await self._final_usage(
+            CacheObservation("miss", 1.0), mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+        )
+
+        assert "prompt_tokens_details" not in miss
