@@ -148,16 +148,19 @@ class TestDiffCompression:
 class TestGrepAndListing:
     """Line-oriented outputs are capped."""
 
-    def test_grep_lines_are_capped(self):
+    def test_grep_is_grouped_per_file(self):
         """
-        What it does: Compresses 800 grep hits.
-        Purpose: Match spam dominates the prompt without adding much.
+        What it does: Compresses 800 grep hits across 40 files.
+        Purpose: Match spam dominates the prompt without adding much; the
+                 per-file grouping keeps the signal and the counts.
         """
         compressed, kind = compress_text(make_grep(800))
 
         assert kind == "grep"
+        assert "800 matches in 40 file(s):" in compressed
+        assert "[file] src/file0.py" in compressed
+        assert "  +10 more" in compressed
         assert compressed.count("\n") < 800
-        assert "src/file0.py:0:" in compressed
 
     def test_listing_entries_are_capped(self):
         """
@@ -209,6 +212,113 @@ class TestLogsAndCap:
         assert compressed.endswith("B" * 1000)
         assert "omitted" in compressed
         assert len(compressed) <= HARD_CAP_BYTES
+
+
+class TestGitFilters:
+    """git status / git log / tree get dedicated compact forms."""
+
+    def test_git_status_becomes_counts(self):
+        """
+        What it does: Compresses a long-form git status with many files.
+        Purpose: The useful signal is which section a path is in, not every path.
+        """
+        lines = ["On branch main", "Your branch is up to date with 'origin/main'.", "",
+                 "Changes not staged for commit:", '  (use "git add <file>..." to update)']
+        lines += [f"\tmodified:   src/file{i}.py" for i in range(30)]
+        lines += ["", "Untracked files:"] + [f"\tnotes{i}.txt" for i in range(12)]
+
+        compressed, kind = compress_text("\n".join(lines))
+
+        assert kind == "git_status"
+        assert "* main" in compressed
+        assert "~ Modified: 30 file(s)" in compressed
+        assert "? Untracked: 12 file(s)" in compressed
+        assert "... +20 more" in compressed
+        assert len(compressed) < len("\n".join(lines))
+
+    def test_git_status_is_idempotent(self):
+        """
+        What it does: Compresses a status twice.
+        Purpose: A second pass must not change bytes (cache safety).
+        """
+        text = "\n".join(["On branch main"] + [f"\tmodified:   f{i}.py" for i in range(20)])
+        once, _ = compress_text(text)
+        twice, kind = compress_text(once)
+
+        assert twice == once
+        assert kind is None
+
+    def test_git_log_is_capped(self):
+        """
+        What it does: Compresses a 300-line git log.
+        Purpose: Only the newest commits matter for context.
+        """
+        lines = []
+        for i in range(40):
+            lines += [f"commit {i:040x}", f"Author: dev <dev@example.com>", "Date:   today", "",
+                      f"    subject {i}", "    body " * 40, ""]
+
+        compressed, kind = compress_text("\n".join(lines))
+
+        assert kind == "git_log"
+        assert compressed.startswith("commit ")
+        assert len(compressed.splitlines()) < len(lines)
+
+    def test_tree_drops_summary_and_caps(self):
+        """
+        What it does: Compresses a 300-entry tree listing.
+        Purpose: The tail of a huge tree adds nothing.
+        """
+        lines = [".", "├── src"] + [f"│   ├── file{i}.py" for i in range(300)]
+        lines += ["", "5 directories, 300 files"]
+
+        compressed, kind = compress_text("\n".join(lines))
+
+        assert kind == "tree"
+        assert "directories" not in compressed
+        assert "more entries" in compressed
+
+
+class TestSmartTruncate:
+    """Long unclassified text (file reads) keeps head and tail."""
+
+    def test_long_code_read_is_truncated(self):
+        """
+        What it does: Compresses a 400-line source file.
+        Purpose: Long reads dominate Read-heavy sessions.
+        """
+        text = "\n".join(f"    value_{i} = compute_{i}()" for i in range(400))
+
+        compressed, kind = compress_text(text)
+
+        assert kind == "truncate"
+        assert "lines omitted" in compressed
+        assert compressed.splitlines()[0] == "    value_0 = compute_0()"
+        assert compressed.splitlines()[-1] == "    value_399 = compute_399()"
+
+    def test_short_read_is_untouched(self):
+        """
+        What it does: Compresses a 100-line file.
+        Purpose: Small files must reach the model verbatim.
+        """
+        text = "\n".join(f"    value_{i} = compute_{i}()" for i in range(100))
+
+        compressed, kind = compress_text(text)
+
+        assert compressed == text
+        assert kind is None
+
+    def test_truncation_is_idempotent(self):
+        """
+        What it does: Truncates the same file twice.
+        Purpose: Repeated turns must send identical bytes.
+        """
+        text = "\n".join(f"    value_{i}()" for i in range(400))
+        once, _ = compress_text(text)
+        twice, kind = compress_text(once)
+
+        assert twice == once
+        assert kind is None
 
 
 class TestPayloadTransform:

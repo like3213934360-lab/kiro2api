@@ -4,8 +4,8 @@
 Deterministic compression of large tool outputs (cache-safe).
 
 Agent sessions spend most of their prompt budget on tool output: git diffs,
-grep hits, directory listings and build logs. They are sent again on every
-turn, so shrinking them once shrinks every later turn too.
+grep hits, directory trees and build logs. They are sent again on every turn,
+so shrinking them once shrinks every later turn too.
 
 Cache safety is the hard requirement. Kiro's prefix cache compares request
 bytes, so a transform may only depend on the *content* of a message, never on
@@ -16,21 +16,26 @@ its position or age. Everything here is a pure function of the text:
 so a tool result transformed on the turn it appears keeps the exact same bytes
 when it is re-sent as history on later turns.
 
-What is compressed (only when it is genuinely large):
+Rules, in order (first match wins):
 
-* unified diffs — keep headers and the first lines of each hunk
-* grep output — cap the number of match lines
-* directory listings — cap the number of entries
-* build/test logs — collapse consecutive duplicate lines, cap total lines
 * anything above the hard cap — keep head and tail
+* unified diffs — keep headers and the first lines of each hunk
+* ``git status`` — collapse to counts plus the first files per section
+* ``git log`` — keep the newest commits, cap the list
+* ``tree`` — drop the summary line, cap the listing
+* ``grep`` — at most 10 matches per file, with a match count header
+* ``find``/``ls`` listings — cap the number of entries
+* build/test logs — collapse repeated lines, then cap
+* any other long text (file reads) — keep head and tail
 
-Error results are never touched, and anything already carrying a marker is
-left alone (idempotency).
+Error results are never touched, and anything already carrying a marker is left
+alone (idempotency).
 """
 
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -50,14 +55,42 @@ HARD_CAP_BYTES = 50_000
 HARD_CAP_HEAD = 24_000
 HARD_CAP_TAIL = 16_000
 
-# Per-format ceilings.
+# Per-format ceilings (mirrors 9router's RTK defaults).
 MAX_DIFF_HUNK_LINES = 120
+MAX_GIT_LOG_LINES = 200
+GREP_PER_FILE_MAX = 10
 MAX_GREP_LINES = 200
 MAX_LISTING_LINES = 200
+MAX_TREE_LINES = 200
 MAX_LOG_LINES = 400
+
+# Generic long-text fallback (file reads and anything unclassified).
+SMART_TRUNCATE_MIN_LINES = 250
+SMART_TRUNCATE_HEAD = 120
+SMART_TRUNCATE_TAIL = 60
+
+STATUS_MAX_FILES = 10
 
 MARKER = "\n[...kiro-gateway: output shortened automatically; re-run the tool for the full result ...]"
 DEDUPE_MARKER = "[kiro-gateway: identical to an earlier tool output; omitted]"
+
+_GREP_LINE_RE = re.compile(r"^([^:\n]+):(\d+):(.*)$")
+_TREE_CHARS = ("├", "└", "│", "|--", "`--")
+_LOG_HINT_RE = re.compile(
+    r"^\s*(\[?\d{2}:\d{2}:\d{2}|\[?\d{4}-\d{2}-\d{2}|INFO|WARN|ERROR|DEBUG|TRACE|"
+    r"Compiling|Finished|Running|test .* \.\.\.|PASS|FAIL|OK\b)",
+    re.IGNORECASE,
+)
+_STATUS_FILE_PREFIXES = (
+    "modified:",
+    "new file:",
+    "deleted:",
+    "renamed:",
+    "copied:",
+    "typechange:",
+    "both modified:",
+    "both added:",
+)
 
 
 @dataclass
@@ -80,10 +113,11 @@ class CompressionStats:
 
     def format(self) -> Optional[str]:
         """
-        Render a log line, or None when nothing changed.
+        Render a log line, or None when there was no tool output at all.
 
         Returns:
-            Compact summary such as ``saved 12.3 KB / 240.0 KB (5.1%) · diff=2``
+            Compact summary such as
+            ``saved 12.3 KB / 240.0 KB (5.1%) · tool_output=512.0 KB · diff=2``
         """
         if self.tool_bytes <= 0:
             return None
@@ -189,12 +223,20 @@ def compress_text(text: str) -> Tuple[str, Optional[str]]:
         candidate, kind = _hard_cap(text), "hard_cap"
     elif _looks_like_diff(text):
         candidate, kind = _compress_diff(text), "diff"
+    elif _looks_like_git_status(text):
+        candidate, kind = _compress_git_status(text), "git_status"
+    elif _looks_like_git_log(text):
+        candidate, kind = _compress_git_log(text), "git_log"
+    elif _looks_like_tree(text):
+        candidate, kind = _compress_tree(text), "tree"
     elif _looks_like_grep(text):
-        candidate, kind = _compress_lines(text, MAX_GREP_LINES, keep="head"), "grep"
+        candidate, kind = _compress_grep(text), "grep"
     elif _looks_like_listing(text):
-        candidate, kind = _compress_lines(text, MAX_LISTING_LINES, keep="head"), "listing"
+        candidate, kind = _compress_lines(text, MAX_LISTING_LINES), "listing"
     elif _looks_like_log(text):
         candidate, kind = _compress_log(text), "log"
+    elif len(text.splitlines()) >= SMART_TRUNCATE_MIN_LINES:
+        candidate, kind = _smart_truncate(text), "truncate"
     else:
         return text, None
 
@@ -203,13 +245,9 @@ def compress_text(text: str) -> Tuple[str, Optional[str]]:
     return candidate, kind
 
 
-def _hard_cap(text: str) -> str:
-    """Keep the head and tail of a pathologically large output."""
-    head = text[:HARD_CAP_HEAD]
-    tail = text[-HARD_CAP_TAIL:]
-    omitted = len(text) - len(head) - len(tail)
-    return f"{head}\n[... {omitted} bytes omitted ...]{MARKER}\n{tail}"
-
+# ---------------------------------------------------------------------------
+# Format detection
+# ---------------------------------------------------------------------------
 
 def _looks_like_diff(text: str) -> bool:
     """True for unified/git diffs."""
@@ -217,17 +255,40 @@ def _looks_like_diff(text: str) -> bool:
     return ("diff --git " in head or head.startswith("diff --git ")) and "\n@@" in text
 
 
+def _looks_like_git_status(text: str) -> bool:
+    """True for long-form or porcelain ``git status`` output."""
+    head = text[:4000]
+    if "On branch " in head:
+        return True
+    if "Changes to be committed" in head or "Changes not staged for commit" in head:
+        return True
+    if "Untracked files:" in head or "nothing to commit" in head:
+        return True
+    prefixed = sum(1 for line in head.splitlines() if line.strip().startswith(_STATUS_FILE_PREFIXES))
+    return prefixed >= 3
+
+
+def _looks_like_git_log(text: str) -> bool:
+    """True when the text is a ``git log`` listing."""
+    head = text[:4000]
+    commits = sum(1 for line in head.splitlines() if line.startswith("commit "))
+    return commits >= 2 and ("Author:" in head or "Date:" in head)
+
+
+def _looks_like_tree(text: str) -> bool:
+    """True for ``tree``/directory diagrams."""
+    head = text[:4000]
+    return any(marker in head for marker in _TREE_CHARS)
+
+
 def _looks_like_grep(text: str) -> bool:
     """True when most lines look like ``path:line:content``."""
     lines = text.splitlines()
     if len(lines) < 20:
         return False
-    hits = 0
-    for line in lines[:200]:
-        first, sep, rest = line.partition(":")
-        if sep and first and rest[:1].isdigit():
-            hits += 1
-    return hits >= min(len(lines[:200]), 20) * 0.8
+    sample = lines[:200]
+    hits = sum(1 for line in sample if _GREP_LINE_RE.match(line))
+    return hits >= min(len(sample), 20) * 0.8
 
 
 def _looks_like_listing(text: str) -> bool:
@@ -241,23 +302,48 @@ def _looks_like_listing(text: str) -> bool:
 
 
 def _looks_like_log(text: str) -> bool:
-    """True for multi-line output long enough to benefit from line capping."""
-    return text.count("\n") >= 60
+    """True for build/test logs: long output with repeats or level prefixes."""
+    lines = text.splitlines()
+    if len(lines) < 60:
+        return False
+    sample = lines[:400]
+    repeated = any(sample[i] == sample[i - 1] for i in range(1, len(sample)))
+    hinted = sum(1 for line in sample if _LOG_HINT_RE.match(line))
+    return repeated or hinted >= len(sample) * 0.3
 
 
-def _compress_lines(text: str, limit: int, keep: str = "head") -> str:
-    """Cap the number of lines, keeping the head (or head and tail)."""
+# ---------------------------------------------------------------------------
+# Compressors
+# ---------------------------------------------------------------------------
+
+def _hard_cap(text: str) -> str:
+    """Keep the head and tail of a pathologically large output."""
+    head = text[:HARD_CAP_HEAD]
+    tail = text[-HARD_CAP_TAIL:]
+    omitted = len(text) - len(head) - len(tail)
+    return f"{head}\n[... {omitted} bytes omitted ...]{MARKER}\n{tail}"
+
+
+def _smart_truncate(text: str) -> str:
+    """Keep the head and tail of a long text (file reads)."""
+    lines = text.splitlines()
+    head = lines[:SMART_TRUNCATE_HEAD]
+    tail = lines[-SMART_TRUNCATE_TAIL:]
+    omitted = len(lines) - len(head) - len(tail)
+    return (
+        "\n".join(head)
+        + f"\n[... {omitted} lines omitted ...]{MARKER}\n"
+        + "\n".join(tail)
+    )
+
+
+def _compress_lines(text: str, limit: int) -> str:
+    """Cap the number of lines, keeping the head."""
     lines = text.splitlines()
     if len(lines) <= limit:
         return text
-    if keep == "head":
-        kept = lines[:limit]
-        omitted = len(lines) - limit
-    else:
-        head = limit // 2
-        tail = limit - head
-        return "\n".join(lines[:head]) + f"\n[... {len(lines) - limit} lines omitted ...]{MARKER}\n" + "\n".join(lines[-tail:])
-    return "\n".join(kept) + f"\n[... {omitted} lines omitted ...]{MARKER}"
+    omitted = len(lines) - limit
+    return "\n".join(lines[:limit]) + f"\n[... {omitted} lines omitted ...]{MARKER}"
 
 
 def _compress_diff(text: str) -> str:
@@ -296,6 +382,142 @@ def _compress_diff(text: str) -> str:
     if len(output) >= len(text.splitlines()):
         return text
     return "\n".join(output) + MARKER
+
+
+def _compress_git_status(text: str) -> str:
+    """
+    Collapse ``git status`` to a branch line plus the first files per section.
+
+    The full status is mostly a long file list; what matters is which section
+    things are in and roughly how many.
+    """
+    lines = text.splitlines()
+    branch = ""
+    sections: Dict[str, List[str]] = {"staged": [], "modified": [], "untracked": []}
+    current: Optional[str] = None
+
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("On branch "):
+            branch = stripped[len("On branch "):]
+            continue
+        if stripped.startswith("Changes to be committed"):
+            current = "staged"
+            continue
+        if stripped.startswith("Changes not staged"):
+            current = "modified"
+            continue
+        if stripped.startswith("Untracked files"):
+            current = "untracked"
+            continue
+        if stripped.startswith(("Your branch", "nothing to commit", "(")) or stripped.startswith('"'):
+            continue
+        if current is None:
+            continue
+
+        name = stripped
+        for prefix in _STATUS_FILE_PREFIXES:
+            if stripped.startswith(prefix):
+                name = stripped[len(prefix):].strip()
+                break
+        sections[current].append(name)
+
+    out: List[str] = []
+    if branch:
+        out.append(f"* {branch}")
+    labels = {"staged": "+ Staged", "modified": "~ Modified", "untracked": "? Untracked"}
+    total = 0
+    for key in ("staged", "modified", "untracked"):
+        items = sections[key]
+        total += len(items)
+        if not items:
+            continue
+        out.append(f"{labels[key]}: {len(items)} file(s)")
+        for name in items[:STATUS_MAX_FILES]:
+            out.append(f"   {name}")
+        if len(items) > STATUS_MAX_FILES:
+            out.append(f"   ... +{len(items) - STATUS_MAX_FILES} more")
+
+    if total == 0:
+        out.append("clean — nothing to commit")
+
+    return "\n".join(out) + MARKER
+
+
+def _compress_git_log(text: str) -> str:
+    """Keep the newest commits and cap the listing."""
+    lines = text.splitlines()
+    if len(lines) <= MAX_GIT_LOG_LINES:
+        return text
+    omitted = len(lines) - MAX_GIT_LOG_LINES
+    return (
+        "\n".join(lines[:MAX_GIT_LOG_LINES])
+        + f"\n[... {omitted} lines omitted ...]{MARKER}"
+    )
+
+
+def _compress_tree(text: str) -> str:
+    """Drop the summary line and cap the tree."""
+    kept: List[str] = []
+    for line in text.splitlines():
+        if "director" in line and "file" in line:
+            continue
+        if not line.strip() and not kept:
+            continue
+        kept.append(line)
+    while kept and not kept[-1].strip():
+        kept.pop()
+
+    if len(kept) > MAX_TREE_LINES:
+        omitted = len(kept) - MAX_TREE_LINES
+        return "\n".join(kept[:MAX_TREE_LINES]) + f"\n[... {omitted} more entries ...]{MARKER}"
+    if len(kept) == len(text.splitlines()):
+        return text
+    return "\n".join(kept)
+
+
+def _compress_grep(text: str) -> str:
+    """
+    Group grep hits per file and keep the first hits of each.
+
+    Mirrors RTK's ``grep`` filter: a header with the match count, then up to
+    ``GREP_PER_FILE_MAX`` hits per file and a ``+N`` marker for the rest.
+    """
+    by_file: Dict[str, List[Tuple[str, str]]] = {}
+    total = 0
+    for line in text.splitlines():
+        match = _GREP_LINE_RE.match(line)
+        if not match:
+            continue
+        path, number, content = match.groups()
+        by_file.setdefault(path, []).append((number, content))
+        total += 1
+
+    if total == 0:
+        return text
+
+    files = sorted(by_file)
+    out: List[str] = [f"{total} matches in {len(files)} file(s):", ""]
+    line_budget = MAX_GREP_LINES
+
+    for path in files:
+        matches = by_file[path]
+        block = [f"[file] {path} ({len(matches)}):"]
+        for number, content in matches[:GREP_PER_FILE_MAX]:
+            block.append(f"  {number:>4}: {content.strip()}")
+        if len(matches) > GREP_PER_FILE_MAX:
+            block.append(f"  +{len(matches) - GREP_PER_FILE_MAX} more")
+        block.append("")
+
+        if line_budget - len(block) < 0:
+            out.append(f"[... {len(files) - files.index(path)} file(s) omitted ...]")
+            break
+        out.extend(block)
+        line_budget -= len(block)
+
+    return "\n".join(out).rstrip() + MARKER
 
 
 def _compress_log(text: str) -> str:
