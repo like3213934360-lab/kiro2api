@@ -33,9 +33,19 @@ wait_gone() {
 }
 
 start_new() {
+  # Remember where the log ended so the new process's own startup lines can be
+  # isolated. lsof cannot be used to confirm the bind: with SO_REUSEPORT the
+  # kernel keeps one inode and lsof reports a single PID for both processes.
+  LOG_OFFSET=$(wc -c < server.log 2>/dev/null || echo 0)
   SERVER_REUSE_PORT=1 nohup .venv/bin/python main.py >> server.log 2>&1 &
   echo $! > "$PID_FILE"
   NEW_PID=$(cat "$PID_FILE")
+}
+
+bound_with_reuse_port() {
+  tail -c +$((LOG_OFFSET + 1)) server.log 2>/dev/null \
+    | sed 's/\x1b\[[0-9;]*m//g' \
+    | grep -q "Listening socket bound with SO_REUSEPORT"
 }
 
 OLD_PID=$(listeners | head -1)
@@ -50,13 +60,16 @@ fi
 echo "当前实例 PID=${OLD_PID}，启动新实例接管端口..."
 start_new
 
-if ! wait_health; then
-  echo "新实例未就绪，放弃切换（旧实例仍在服务）"
-  kill -TERM "$NEW_PID" 2>/dev/null
-  exit 1
-fi
+# Wait for the NEW process specifically. Checking /health here would pass
+# immediately because the old process is still answering.
+BOUND=0
+for i in $(seq 1 400); do
+  if ! kill -0 "$NEW_PID" 2>/dev/null; then break; fi
+  if bound_with_reuse_port; then BOUND=1; break; fi
+  sleep 0.1
+done
 
-if ! listeners | grep -qx "$NEW_PID"; then
+if [ "$BOUND" != "1" ]; then
   echo "新实例无法与旧实例共存（旧实例缺少 SO_REUSEPORT），改用短空档重启"
   kill -TERM "$NEW_PID" 2>/dev/null
   wait_gone "$NEW_PID" || kill -9 "$NEW_PID" 2>/dev/null
@@ -69,6 +82,12 @@ if ! listeners | grep -qx "$NEW_PID"; then
     exit 0
   fi
   echo "重启失败，见 server.log"
+  exit 1
+fi
+
+if ! wait_health; then
+  echo "新实例已绑定端口但健康检查未通过，保留旧实例继续服务"
+  kill -TERM "$NEW_PID" 2>/dev/null
   exit 1
 fi
 
