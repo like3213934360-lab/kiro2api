@@ -50,6 +50,7 @@ from kiro.config import (
     model_max_input_tokens,
 )
 from kiro.payload_guards import check_payload_size, trim_payload_to_limit
+from kiro.request_context import set_client_prompt_tokens
 from kiro.tool_compression import compress_tool_outputs
 
 
@@ -1646,6 +1647,12 @@ def auto_prune_context(payload: Dict[str, Any], model_id: Optional[str] = None) 
     # for a pruning decision and avoids running a tokenizer on every turn.
     threshold = auto_prune_threshold(model_id)
     estimated_tokens = int(check_payload_size(payload) / 3.5)
+
+    # Record the size *before* the pruning below rewrites anything. The client
+    # still holds this conversation, so this is the number that must reach it
+    # for auto-compaction to fire; the post-prune payload is only what we send.
+    set_client_prompt_tokens(estimated_tokens)
+
     if estimated_tokens <= threshold:
         return 0
 

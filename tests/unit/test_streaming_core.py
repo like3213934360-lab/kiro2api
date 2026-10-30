@@ -2056,6 +2056,13 @@ class TestWithKeepalive:
 class TestEffectivePromptTokens:
     """The client must see the real prompt size, not Kiro's percentage."""
 
+    @staticmethod
+    def _clear():
+        from kiro.request_context import set_client_prompt_tokens, set_payload_estimate
+
+        set_client_prompt_tokens(None)
+        set_payload_estimate(None)
+
     def test_uses_the_measured_payload(self):
         """
         What it does: Sets a payload estimate and asks for the reported size.
@@ -2065,11 +2072,13 @@ class TestEffectivePromptTokens:
         from kiro.request_context import set_payload_estimate
         from kiro.streaming_core import effective_prompt_tokens
 
+        self._clear()
         set_payload_estimate(490_000)
 
         assert effective_prompt_tokens(362_000) == 490_000
         # Never understate: small payloads measure lower than Kiro's count.
         assert effective_prompt_tokens(520_000) == 520_000
+        self._clear()
 
     def test_falls_back_to_kiro_when_unmeasured(self):
         """
@@ -2079,8 +2088,65 @@ class TestEffectivePromptTokens:
         from kiro.request_context import set_payload_estimate
         from kiro.streaming_core import effective_prompt_tokens
 
+        self._clear()
         set_payload_estimate(None)
         assert effective_prompt_tokens(1234) == 1234
 
         set_payload_estimate(0)
         assert effective_prompt_tokens(1234) == 1234
+        self._clear()
+
+    def test_compaction_does_not_hide_the_conversation_size(self):
+        """
+        What it does: Records a 1.4M-token conversation, then the 34k payload
+                 the gateway produced by summarising older turns, and asks what
+                 the client is told.
+        Purpose: Regression guard for the stuck-session bug. The route records
+                 the payload estimate *after* compaction, so a session far past
+                 the window reported ~46k (4.6%) and Claude Code never
+                 auto-compacted; the model only ever saw a shrunken prompt and
+                 repeated the same shell commands for hours.
+        """
+        from kiro.request_context import set_client_prompt_tokens, set_payload_estimate
+        from kiro.streaming_core import effective_prompt_tokens
+
+        self._clear()
+        print("Action: 1_447_004-token conversation, compacted to 34_466...")
+        set_client_prompt_tokens(1_447_004)   # measured before compaction
+        set_payload_estimate(34_466)          # measured after compaction
+        reported = effective_prompt_tokens(46_517)  # what Kiro reported
+
+        print(f"Reported to client: {reported:,}")
+        assert reported == 1_447_004
+        self._clear()
+
+    def test_client_size_beats_a_larger_kiro_reading(self):
+        """
+        What it does: Records a client size larger than Kiro's reading.
+        Purpose: Kiro derives its number from a percentage, so it can be lower
+                 than reality; the larger honest measurement must win.
+        """
+        from kiro.request_context import set_client_prompt_tokens
+        from kiro.streaming_core import effective_prompt_tokens
+
+        self._clear()
+        set_client_prompt_tokens(700_000)
+
+        assert effective_prompt_tokens(640_000) == 700_000
+        self._clear()
+
+    def test_never_reports_below_kiro(self):
+        """
+        What it does: Records a client size smaller than Kiro's reading.
+        Purpose: Compaction shrinks the conversation in the client too; Kiro's
+                 own count must not be overridden downwards.
+        """
+        from kiro.request_context import set_client_prompt_tokens
+        from kiro.streaming_core import effective_prompt_tokens
+
+        self._clear()
+        set_client_prompt_tokens(10_000)
+
+        assert effective_prompt_tokens(80_000) == 80_000
+        self._clear()
+

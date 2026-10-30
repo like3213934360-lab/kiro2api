@@ -7010,3 +7010,104 @@ class TestAutoPruneContext:
         )
         assert auto_prune_context(payload, "small-window") > 0
 
+    def test_records_the_size_before_pruning(self, monkeypatch):
+        """
+        What it does: Prunes a large payload and compares the recorded size with
+                 the size before and after pruning.
+        Purpose: Pruning shrinks the prompt we send, but the client still holds
+                 the full conversation. Recording the pre-prune size is what
+                 lets the client auto-compact; recording the post-prune size is
+                 what kept a 1.4M-token session reporting 4% used.
+        """
+        import kiro.converters_core as cc
+        from kiro.request_context import get_client_prompt_tokens, set_client_prompt_tokens
+
+        monkeypatch.setattr(cc, "auto_prune_threshold", lambda model_id=None: 1000)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS", 1)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_CHARS", 100)
+        set_client_prompt_tokens(None)
+
+        payload = {
+            "conversationState": {
+                "history": [
+                    {"userInputMessage": {"userInputMessageContext": {"toolResults": [
+                        {"content": [{"text": "Z" * 4000}], "status": "success",
+                         "toolUseId": f"old-{i}"}
+                    ]}}}
+                    for i in range(5)
+                ],
+                "currentMessage": {"userInputMessage": {"content": "continue"}},
+            }
+        }
+        before = int(cc.check_payload_size(payload) / 3.5)
+
+        removed = auto_prune_context(payload)
+        after = int(cc.check_payload_size(payload) / 3.5)
+
+        print(f"Before: ~{before}, after: ~{after}, recorded: {get_client_prompt_tokens()}")
+        assert removed > 0
+        assert after < before
+        assert get_client_prompt_tokens() == before
+        set_client_prompt_tokens(None)
+
+    def test_records_the_size_when_nothing_needs_pruning(self, monkeypatch):
+        """
+        What it does: Runs pruning on a payload below the threshold.
+        Purpose: The measurement must exist even when the gateway does not
+                 rewrite anything, so the reported usage is never empty.
+        """
+        import kiro.converters_core as cc
+        from kiro.request_context import get_client_prompt_tokens, set_client_prompt_tokens
+
+        monkeypatch.setattr(cc, "auto_prune_threshold", lambda model_id=None: 10_000_000)
+        set_client_prompt_tokens(None)
+
+        payload = {
+            "conversationState": {
+                "history": [
+                    {"userInputMessage": {"userInputMessageContext": {"toolResults": [
+                        {"content": [{"text": "small"}], "status": "success",
+                         "toolUseId": "a"}
+                    ]}}}
+                ],
+                "currentMessage": {"userInputMessage": {"content": "continue"}},
+            }
+        }
+        expected = int(cc.check_payload_size(payload) / 3.5)
+
+        assert auto_prune_context(payload) == 0
+        assert get_client_prompt_tokens() == expected
+        set_client_prompt_tokens(None)
+
+    def test_pruning_never_lowers_an_earlier_larger_measurement(self, monkeypatch):
+        """
+        What it does: Records a large size, then prunes a smaller payload.
+        Purpose: The value is monotonic per request, so a second pruning pass
+                 cannot make the client believe its context shrank.
+        """
+        import kiro.converters_core as cc
+        from kiro.request_context import get_client_prompt_tokens, set_client_prompt_tokens
+
+        monkeypatch.setattr(cc, "auto_prune_threshold", lambda model_id=None: 1000)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS", 1)
+        monkeypatch.setattr(cc, "AUTO_PRUNE_PREVIEW_CHARS", 100)
+
+        set_client_prompt_tokens(1_447_004)
+        payload = {
+            "conversationState": {
+                "history": [
+                    {"userInputMessage": {"userInputMessageContext": {"toolResults": [
+                        {"content": [{"text": "Q" * 2000}], "status": "success",
+                         "toolUseId": f"old-{i}"}
+                    ]}}}
+                    for i in range(3)
+                ],
+                "currentMessage": {"userInputMessage": {"content": "continue"}},
+            }
+        }
+
+        auto_prune_context(payload)
+
+        assert get_client_prompt_tokens() == 1_447_004
+        set_client_prompt_tokens(None)
+

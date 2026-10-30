@@ -64,6 +64,7 @@ from kiro.streaming_core import EmptyKiroResponseError
 from kiro.effort import effort_from_payload, split_effort_suffix
 from kiro.compaction import auto_compact_threshold, maybe_compact_request
 from kiro.request_log import note_payload_estimate
+from kiro.request_context import set_client_prompt_tokens
 from kiro.payload_guards import check_payload_size
 from kiro.http_client import KiroHttpClient
 from kiro.utils import conversation_diagnostic_id, resolve_conversation_id, summarize_cache_prefix
@@ -351,6 +352,11 @@ async def messages(
         apply_claude_correction=False,
     )["total_tokens"]
 
+    # This measures the conversation as the client holds it, before the gateway
+    # prunes tool results or summarises older turns. It is what the client must
+    # see in the usage it receives, otherwise its auto-compaction never fires.
+    set_client_prompt_tokens(estimated_input_tokens)
+
     if anthropic_version:
         logger.debug(f"Anthropic-Version header: {anthropic_version}")
     
@@ -630,6 +636,12 @@ async def messages(
             # turns and rebuild. The client keeps its full history; only this
             # outbound payload is compacted.
             payload_tokens = int(check_payload_size(kiro_payload) / 3.5)
+
+            # Compaction below rewrites the prompt. Record the size it is about
+            # to shrink from, so the client keeps seeing how large its own
+            # conversation is and compacts itself at the right moment.
+            set_client_prompt_tokens(payload_tokens)
+
             compact_threshold = auto_compact_threshold(request_data.model)
             if payload_tokens > compact_threshold:
                 compacted = await maybe_compact_request(
