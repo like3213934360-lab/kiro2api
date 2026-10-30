@@ -435,3 +435,60 @@ class TestModelInfoCacheThreadSafety:
         print("Проверка: Все чтения вернули одинаковый результат...")
         assert all(r is not None for r in results)
         assert all(r["modelId"] == "claude-sonnet-4" for r in results)
+
+class TestSuffixedModelLookup:
+    """Effort-suffixed ids must resolve to their base model's metadata."""
+
+    @pytest.mark.asyncio
+    async def test_suffixed_id_uses_base_limits_and_rate(self):
+        """
+        What it does: Asks the cache for "claude-opus-5.5-xhigh".
+        Purpose: Claude Desktop sends suffixed ids; a cache miss silently fell
+                 back to a 200k window, which made reported context usage ~10x
+                 too small.
+        """
+        cache = ModelInfoCache()
+        await cache.update([
+            {
+                "modelId": "claude-opus-5.5",
+                "modelName": "Claude Opus 5.5",
+                "tokenLimits": {"maxInputTokens": 1_000_000, "maxOutputTokens": 64_000},
+                "rateMultiplier": 2.0,
+                "rateUnit": "Credit",
+            }
+        ])
+
+        assert cache.get_max_input_tokens("claude-opus-5.5-xhigh") == 1_000_000
+        assert cache.get_rate_multiplier("claude-opus-5.5-xhigh") == 2.0
+        assert cache.get_rate_unit("claude-opus-5.5-xhigh") == "Credit"
+
+    @pytest.mark.asyncio
+    async def test_thinking_suffix_is_handled_too(self):
+        """
+        What it does: Looks up a "-thinking" variant.
+        Purpose: Router-style suffixes exist in the wild as well.
+        """
+        cache = ModelInfoCache()
+        await cache.update([
+            {
+                "modelId": "claude-sonnet-5",
+                "modelName": "Claude Sonnet 5",
+                "tokenLimits": {"maxInputTokens": 1_000_000},
+                "rateMultiplier": 1.3,
+            }
+        ])
+
+        assert cache.get_max_input_tokens("claude-sonnet-5-thinking") == 1_000_000
+        assert cache.get_rate_multiplier("claude-sonnet-5-thinking") == 1.3
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_still_falls_back(self):
+        """
+        What it does: Looks up a model the cache has never seen.
+        Purpose: Pass-through models must keep working with defaults.
+        """
+        cache = ModelInfoCache()
+        await cache.update([])
+
+        assert cache.get_max_input_tokens("totally-unknown-high") == DEFAULT_MAX_INPUT_TOKENS
+        assert cache.get_rate_multiplier("totally-unknown-high") is None

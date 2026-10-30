@@ -57,6 +57,7 @@ from kiro.utils import (
 
 # Reuse the OpenAI endpoint's API-key verification (same Bearer scheme)
 from kiro.routes_openai import verify_api_key, make_usage_reporter
+from kiro.request_log import note_payload_estimate
 
 try:
     from kiro.debug_logger import debug_logger
@@ -273,6 +274,7 @@ async def responses(request: Request, request_data: ResponsesRequest):
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
+            note_payload_estimate(request, kiro_payload)
             request.state.request_log_effort = effort_from_payload(kiro_payload)
 
             if debug_logger:
@@ -423,6 +425,7 @@ async def responses(request: Request, request_data: ResponsesRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    note_payload_estimate(request, kiro_payload)
     request.state.request_log_effort = effort_from_payload(kiro_payload)
 
     if debug_logger:

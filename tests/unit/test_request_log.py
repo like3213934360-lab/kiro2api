@@ -28,3 +28,37 @@ def test_limit_is_bounded():
 
     assert len(store.list(limit=2)["logs"]) == 2
     assert len(store.list(limit=999)["logs"]) == 5
+
+
+def test_note_payload_estimate_records_size():
+    """
+    What it does: Records a payload's serialized size on the request.
+    Purpose: The admin log keeps both Kiro-reported tokens and the real payload
+             size so cost analysis is not based on a single estimate.
+    """
+    from types import SimpleNamespace
+
+    from kiro.request_log import note_payload_estimate
+
+    request = SimpleNamespace(state=SimpleNamespace())
+    payload = {"conversationState": {"history": [{"userInputMessage": {"content": "x" * 350}}]}}
+
+    estimate = note_payload_estimate(request, payload)
+
+    assert request.state.payload_bytes > 350
+    assert estimate == int(request.state.payload_bytes / 3.5)
+
+
+def test_note_payload_estimate_tolerates_plain_object():
+    """
+    What it does: Passes an object without a writable state.
+    Purpose: Logging helpers must never break a request.
+    """
+    from kiro.request_log import note_payload_estimate
+
+    class _NoState:
+        pass
+
+    estimate = note_payload_estimate(_NoState(), {"a": 1})
+
+    assert estimate >= 0

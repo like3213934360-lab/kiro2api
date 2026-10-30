@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from kiro.config import MODEL_CACHE_TTL, DEFAULT_MAX_INPUT_TOKENS
+from kiro.config import MODEL_CACHE_TTL, DEFAULT_MAX_INPUT_TOKENS, base_model_id
 
 
 class ModelInfoCache:
@@ -136,10 +136,32 @@ class ModelInfoCache:
         Returns:
             Maximum number of input tokens or DEFAULT_MAX_INPUT_TOKENS
         """
-        model = self._cache.get(model_id)
+        model = self._lookup(model_id)
         if model and model.get("tokenLimits"):
             return model["tokenLimits"].get("maxInputTokens") or DEFAULT_MAX_INPUT_TOKENS
         return DEFAULT_MAX_INPUT_TOKENS
+
+    def _lookup(self, model_id: str) -> Optional[dict]:
+        """
+        Find a model entry, tolerating effort/thinking suffixes.
+
+        ``claude-opus-5.5-xhigh`` must resolve to ``claude-opus-5.5``; otherwise
+        limits and rates silently fall back to defaults for exactly the models
+        clients use most.
+
+        Args:
+            model_id: Model id from the request
+
+        Returns:
+            Cached model metadata, or None
+        """
+        model = self._cache.get(model_id)
+        if model is not None:
+            return model
+        base = base_model_id(model_id)
+        if base and base != model_id:
+            return self._cache.get(base)
+        return None
     
     def get_rate_multiplier(self, model_id: str) -> Optional[float]:
         """
@@ -154,7 +176,7 @@ class ModelInfoCache:
         Returns:
             The multiplier as a float, or None when the cache has no value
         """
-        model = self._cache.get(model_id)
+        model = self._lookup(model_id)
         if not model:
             return None
         rate = model.get("rateMultiplier")
@@ -173,7 +195,7 @@ class ModelInfoCache:
         Returns:
             The rate unit (e.g. "Credit"), or None when unavailable
         """
-        model = self._cache.get(model_id)
+        model = self._lookup(model_id)
         if not model:
             return None
         unit = model.get("rateUnit")

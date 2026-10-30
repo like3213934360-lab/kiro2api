@@ -15,6 +15,35 @@ from collections import deque
 from typing import Any, Dict, List
 
 
+def note_payload_estimate(request: Any, payload: Any) -> int:
+    """
+    Record the outgoing payload size on the request for the admin log.
+
+    The gateway reports two token numbers per request: what Kiro says it
+    processed (derived from ``contextUsagePercentage``) and what the payload
+    actually weighs (serialized bytes / 3.5). They can diverge by an order of
+    magnitude on long sessions, so both are kept for cost analysis.
+
+    Args:
+        request: FastAPI request whose ``state`` receives the values
+        payload: Outgoing Kiro payload
+
+    Returns:
+        Estimated prompt tokens
+    """
+    from kiro.payload_guards import check_payload_size
+
+    size = int(check_payload_size(payload))
+    estimate = int(size / 3.5)
+    try:
+        request.state.payload_bytes = size
+        request.state.payload_estimate_tokens = estimate
+    except AttributeError:
+        pass
+    return estimate
+
+
+
 class RequestLogStore:
     def __init__(self, max_entries: int = 500):
         self._entries: deque = deque(maxlen=max_entries)

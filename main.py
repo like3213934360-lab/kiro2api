@@ -624,6 +624,8 @@ async def log_api_requests(request, call_next):
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=usage.get("total_tokens"),
+            payload_estimate_tokens=getattr(request.state, "payload_estimate_tokens", None),
+            payload_bytes=getattr(request.state, "payload_bytes", None),
             credits=usage.get("credits_used"),
             cache_read_tokens=usage.get("cache_read_input_tokens"),
             cache_creation_tokens=usage.get("cache_creation_input_tokens"),
@@ -640,6 +642,14 @@ async def log_api_requests(request, call_next):
             user_agent=(request.headers.get("user-agent") or "")[:160],
         )
         request_log_store.add(**entry)
+
+        estimate = entry.get("payload_estimate_tokens")
+        if estimate:
+            logger.info(
+                f"[Tokens] reported_in={input_tokens} estimated_prompt={estimate} "
+                f"payload_bytes={entry.get('payload_bytes')} "
+                f"cache={entry.get('cache_hit') or 'unknown'}"
+            )
 
     if hasattr(response, "body_iterator"):
         original_iterator = response.body_iterator

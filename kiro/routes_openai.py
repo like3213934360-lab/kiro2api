@@ -62,6 +62,7 @@ from kiro.converters_openai import build_kiro_payload
 from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response, stream_with_first_token_retry
 from kiro.http_client import KiroHttpClient
 from kiro.utils import conversation_diagnostic_id, resolve_conversation_id, summarize_cache_prefix
+from kiro.request_log import note_payload_estimate
 from kiro.config import WEB_SEARCH_ENABLED
 from kiro.mcp_tools import handle_native_web_search
 
@@ -537,6 +538,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             
+            note_payload_estimate(request, kiro_payload)
             request.state.request_log_effort = effort_from_payload(kiro_payload)
 
             # Log Kiro payload (only when debug logging is enabled; serializing
@@ -801,6 +803,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     
+    note_payload_estimate(request, kiro_payload)
     request.state.request_log_effort = effort_from_payload(kiro_payload)
 
     # Log Kiro payload (only when debug logging is enabled; serializing
