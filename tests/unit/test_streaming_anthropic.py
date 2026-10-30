@@ -2279,3 +2279,63 @@ class TestPrecomputedTokenReuse:
 
         start = next(e for e in events if "event: message_start" in e)
         assert '"input_tokens": 321000' in start
+
+
+class TestAdaptiveFirstTokenTimeout:
+    """
+    The retry budget must follow the measured prompt, not a character guess.
+
+    A retry re-sends the entire prompt, paying for the prefill twice and taking
+    twice as long, so the timeout must not be shorter than a legitimate first
+    token at that size.
+    """
+
+    @pytest.mark.asyncio
+    async def test_timeout_scales_with_measured_tokens(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Streams with a 340K-token prompt measurement.
+        Purpose: Character counting saw only message text and produced a budget
+                 below the measured 28s first token, risking a full retry.
+        """
+        captured = {}
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            captured["timeout"] = args[1]
+            yield KiroEvent(type="content", content="Hello")
+
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_anthropic.parse_bracket_tool_calls', return_value=[]):
+                with patch('kiro.streaming_anthropic.get_client_prompt_tokens', return_value=340_000):
+                    async for _ in stream_kiro_to_anthropic(
+                        mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager,
+                        request_messages=[{"role": "user", "content": "hi"}],
+                    ):
+                        pass
+
+        # 15s base + 340K/10K = 49s, well above the 28s observed first token.
+        assert captured["timeout"] >= 40.0
+        assert captured["timeout"] <= 90.0
+
+    @pytest.mark.asyncio
+    async def test_small_prompt_keeps_the_default(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Streams with a small prompt.
+        Purpose: The default must not be inflated for ordinary requests, or a
+                 dead upstream would hang the client.
+        """
+        captured = {}
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            captured["timeout"] = args[1]
+            yield KiroEvent(type="content", content="Hello")
+
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_anthropic.parse_bracket_tool_calls', return_value=[]):
+                with patch('kiro.streaming_anthropic.get_client_prompt_tokens', return_value=2_000):
+                    async for _ in stream_kiro_to_anthropic(
+                        mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager,
+                        request_messages=[{"role": "user", "content": "hi"}],
+                    ):
+                        pass
+
+        assert captured["timeout"] == pytest.approx(15.2, abs=0.5)
