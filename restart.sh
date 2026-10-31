@@ -25,7 +25,7 @@ wait_health() {
 
 wait_gone() {
   local pid=$1 i
-  for i in $(seq 1 450); do
+  for i in $(seq 1 200); do
     kill -0 "$pid" 2>/dev/null || return 0
     sleep 0.1
   done
@@ -99,8 +99,10 @@ kill -TERM "$OLD_PID" 2>/dev/null || true
 if wait_gone "$OLD_PID"; then
   echo "旧实例 PID=${OLD_PID} 已优雅退出"
 else
-  echo "旧实例 30s 未退出，强制结束"
-  kill -9 "$OLD_PID" 2>/dev/null || true
+  # Never SIGKILL: the old process may still be finishing a long model turn.
+  # It holds no new connections (the replacement owns the port now) and exits on
+  # its own once its last request completes.
+  echo "旧实例 PID=${OLD_PID} 仍在处理在途请求，完成后会自行退出（不影响新请求）"
 fi
 
 echo "无感重启完成，PID=${NEW_PID}"
