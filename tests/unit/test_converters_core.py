@@ -7376,3 +7376,119 @@ class TestPrunePreviewRescuesErrors:
         # Head and tail also contain such lines; the rescued block itself is capped.
         assert f"{AUTO_PRUNE_MAX_KEPT_ERRORS} error/failure line(s) kept" in preview
         assert preview.count("ERROR: failure") < 60
+
+
+class TestHistoryImageCap:
+    """
+    Historical screenshots are bounded; the newest ones stay intact.
+
+    Every turn re-sends the whole conversation, and a UI-verification session
+    takes one screenshot per step: 36 frames measured 4.7 MB and pushed first
+    token latency from 5.2s to 8.2s, growing with every new frame.
+    """
+
+    @staticmethod
+    def _payload(count: int) -> dict:
+        return {"conversationState": {"history": [
+            {"userInputMessage": {
+                "content": f"step {i}",
+                "images": [{"format": "jpeg", "source": {"bytes": "A" * 100}}],
+            }}
+            for i in range(count)
+        ]}}
+
+    def _images(self, payload: dict) -> int:
+        return sum(
+            len(entry["userInputMessage"].get("images") or [])
+            for entry in payload["conversationState"]["history"]
+        )
+
+    def test_keeps_only_the_newest_images(self):
+        """
+        What it does: Caps a 20-frame history at 12.
+        Purpose: The newest frames are what the model verifies against.
+        """
+        from kiro.converters_core import cap_history_images
+
+        payload = self._payload(20)
+        kept, dropped = cap_history_images(payload, 12)
+
+        assert (kept, dropped) == (12, 8)
+        assert self._images(payload) == 12
+        # The last entries keep their image, the first ones lost it.
+        history = payload["conversationState"]["history"]
+        assert "images" not in history[0]["userInputMessage"]
+        assert "images" in history[-1]["userInputMessage"]
+
+    def test_dropped_entries_keep_a_note(self):
+        """
+        What it does: Inspects an entry whose image was removed.
+        Purpose: The model must know a frame existed instead of guessing.
+        """
+        from kiro.converters_core import cap_history_images
+
+        payload = self._payload(20)
+        cap_history_images(payload, 12)
+
+        content = payload["conversationState"]["history"][0]["userInputMessage"]["content"]
+        assert "screenshot dropped" in content
+        assert "take a new screenshot" in content
+
+    def test_is_idempotent(self):
+        """
+        What it does: Runs the cap twice.
+        Purpose: A second pass must not change bytes (cache safety).
+        """
+        from kiro.converters_core import cap_history_images
+
+        payload = self._payload(20)
+        cap_history_images(payload, 12)
+        import json as _json
+        once = _json.dumps(payload, sort_keys=True)
+        cap_history_images(payload, 12)
+
+        assert _json.dumps(payload, sort_keys=True) == once
+
+    def test_zero_disables_the_cap(self):
+        """
+        What it does: Passes a limit of 0.
+        Purpose: Operators must be able to turn the behaviour off.
+        """
+        from kiro.converters_core import cap_history_images
+
+        payload = self._payload(20)
+        kept, dropped = cap_history_images(payload, 0)
+
+        assert (kept, dropped) == (0, 0)
+        assert self._images(payload) == 20
+
+    def test_short_history_is_untouched(self):
+        """
+        What it does: Caps a history below the limit.
+        Purpose: Normal sessions must be sent byte-for-byte as before.
+        """
+        from kiro.converters_core import cap_history_images
+
+        payload = self._payload(3)
+        import json as _json
+        before = _json.dumps(payload, sort_keys=True)
+        cap_history_images(payload, 12)
+
+        assert _json.dumps(payload, sort_keys=True) == before
+
+    def test_current_message_images_are_never_touched(self):
+        """
+        What it does: Caps history while the current message carries an image.
+        Purpose: The screenshot the user just asked about must always be visible.
+        """
+        from kiro.converters_core import cap_history_images
+
+        payload = self._payload(20)
+        payload["conversationState"]["currentMessage"] = {"userInputMessage": {
+            "content": "look at this",
+            "images": [{"format": "jpeg", "source": {"bytes": "B" * 100}}],
+        }}
+        cap_history_images(payload, 12)
+
+        current = payload["conversationState"]["currentMessage"]["userInputMessage"]
+        assert len(current["images"]) == 1

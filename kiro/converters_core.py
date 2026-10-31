@@ -48,6 +48,7 @@ from kiro.config import (
     AUTO_TRIM_PAYLOAD,
     AUTO_CONTEXT_PRUNE_RATIO,
     AUTO_CONTEXT_PRUNE_TOKENS,
+    MAX_HISTORY_IMAGES,
     AUTO_CONTEXT_PRUNE_FALLBACK_TOKENS,
     model_max_input_tokens,
 )
@@ -1769,6 +1770,72 @@ def auto_prune_context(payload: Dict[str, Any], model_id: Optional[str] = None) 
     return removed
 
 
+
+def cap_history_images(payload: Dict[str, Any], max_images: int) -> Tuple[int, int]:
+    """
+    Keep only the newest historical screenshots in the outbound prompt.
+
+    Every turn re-sends the whole conversation, including every screenshot ever
+    taken. A device-verification session takes one per step, so the request body
+    grows without bound: 36 frames measured 4.7 MB and pushed first-token latency
+    from 5.2s to 8.2s, with the next frame making it worse again.
+
+    The newest ``max_images`` frames are left byte-for-byte intact, because those
+    are the ones the model verifies against. Older entries keep their text (the
+    tool call that produced the frame) and gain one note saying the image was
+    dropped, so the model knows a frame existed and can take a fresh one instead
+    of guessing.
+
+    Args:
+        payload: Kiro payload with history already built
+        max_images: Number of historical images to keep; 0 disables the cap
+
+    Returns:
+        Tuple of (images kept, images dropped)
+    """
+    if max_images <= 0:
+        return 0, 0
+
+    history = (payload.get("conversationState") or {}).get("history") or []
+    with_images = []
+    for entry in history:
+        user_input = entry.get("userInputMessage") or {}
+        images = user_input.get("images") or []
+        if images:
+            with_images.append((user_input, images))
+
+    total = sum(len(images) for _, images in with_images)
+    if total <= max_images:
+        return total, 0
+
+    budget = max_images
+    kept = 0
+    dropped = 0
+    for user_input, images in reversed(with_images):
+        if budget >= len(images):
+            budget -= len(images)
+            kept += len(images)
+            continue
+        if budget > 0:
+            kept += budget
+            dropped += len(images) - budget
+            user_input["images"] = images[-budget:]
+            budget = 0
+        else:
+            dropped += len(images)
+            user_input.pop("images", None)
+
+        note = (
+            "[screenshot dropped from this request to keep it small — "
+            "take a new screenshot if you need to look again]"
+        )
+        content = user_input.get("content") or ""
+        if note not in content:
+            user_input["content"] = (content + "\n" + note).strip()
+
+    return kept, dropped
+
+
 def build_kiro_payload(
     messages: List[UnifiedMessage],
     system_prompt: str,
@@ -1962,6 +2029,15 @@ def build_kiro_payload(
     # level from the model suffix, output_config.effort or thinking budget.
     if effort:
         payload["additionalModelRequestFields"] = build_effort_fields(model_id, effort)
+
+    # Bound the number of historical screenshots before anything else measures
+    # the payload: they dominate the request and are re-sent every turn.
+    kept_images, dropped_images = cap_history_images(payload, MAX_HISTORY_IMAGES)
+    if dropped_images:
+        logger.info(
+            f"[Images] kept {kept_images} historical screenshot(s), dropped "
+            f"{dropped_images} (limit {MAX_HISTORY_IMAGES})"
+        )
 
     # Deterministic tool-output compression. Runs on every turn but is a pure
     # function of each message's content, so bytes stay identical across turns

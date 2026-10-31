@@ -379,6 +379,13 @@ AUTO_CONTEXT_PRUNE_FALLBACK_TOKENS: int = 220_000
 # a different latency budget. 0 means "derive from the model window".
 AUTO_CONTEXT_PRUNE_TOKENS: int = int(os.getenv("AUTO_PRUNE_TOKENS", "0") or 0)
 
+# Historical screenshots kept in the outbound prompt. Every turn re-sends them,
+# and a UI-verification session takes one per step: 36 device screenshots measured
+# 4.7 MB and pushed first-token latency from 5.2s to 8.2s, growing with every new
+# frame. The newest frames stay intact (that is what the model verifies against);
+# older ones are replaced by a one-line note. 0 disables the cap.
+MAX_HISTORY_IMAGES: int = int(os.getenv("MAX_HISTORY_IMAGES", "12"))
+
 # Auto-compaction is a last resort. It asks the model to summarise old history
 # (a real upstream call that costs credits) and replaces the conversation
 # prefix, which invalidates the whole prompt cache. Keeping it well above the
