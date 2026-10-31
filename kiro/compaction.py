@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -72,6 +73,12 @@ def auto_compact_threshold(model_id: Optional[str]) -> int:
     return max(1, int(limit * AUTO_COMPACT_RATIO))
 
 
+_SUMMARIZER_ERROR_RE = __import__("re").compile(
+    r"(error|failed|failure|exception|traceback|fatal|panic|not found|✗|"
+    r"\bFAILED\b|\bERROR\b|non-zero exit|exit=\d+)",
+    __import__("re").IGNORECASE,
+)
+
 SUMMARY_MODEL_ID = "claude-haiku-5.5"
 SUMMARY_MAX_CHARS = 12_000
 SUMMARY_CACHE_TTL_SECONDS = 600
@@ -92,6 +99,10 @@ not repeat work:
 - every fact confirmed by reading code, docs or the device;
 - the current state of the working tree (files changed, created, deleted,
   staged, uncommitted).
+
+Quote error messages, exit codes and test counts verbatim instead of describing
+them. "ERROR: cameraDegree undefined" is evidence; "the user said cameraDegree"
+is not, and the next turn will answer "unconfirmed" and re-run the command.
 
 Omit:
 - raw tool output, repeated file contents and chit-chat;
@@ -173,8 +184,26 @@ def _summarizer_excerpt(text: str, limit: int) -> str:
         return text
     head = max(1, int(limit * 2 / 3))
     tail = max(1, limit - head)
+    middle = text[head:-tail] if len(text) > head + tail else ""
     omitted = len(text) - head - tail
-    return f"{text[:head]}\n[... {omitted} chars omitted ...]\n{text[-tail:]}"
+
+    # The verdict of a command is rarely in the first or last third: an error
+    # can sit between hundreds of warnings. The summary is asked to record
+    # outcomes, so those lines are carried through.
+    rescued = [
+        line.strip()[:200]
+        for line in middle.splitlines()
+        if line.strip() and _SUMMARIZER_ERROR_RE.search(line)
+    ][:8]
+
+    if not rescued:
+        return f"{text[:head]}\n[... {omitted} chars omitted ...]\n{text[-tail:]}"
+    return (
+        f"{text[:head]}\n[... {omitted} chars omitted; "
+        f"{len(rescued)} error/failure line(s) kept below ...]\n"
+        + "\n".join(rescued)
+        + f"\n{text[-tail:]}"
+    )
 
 
 def _render_transcript(messages: List[Any], tool_result_max_chars: int = 1500) -> str:

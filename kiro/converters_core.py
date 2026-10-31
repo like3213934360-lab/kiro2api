@@ -32,6 +32,7 @@ to convert their formats to Kiro API format.
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -46,6 +47,7 @@ from kiro.config import (
     KIRO_MAX_PAYLOAD_BYTES,
     AUTO_TRIM_PAYLOAD,
     AUTO_CONTEXT_PRUNE_RATIO,
+    AUTO_CONTEXT_PRUNE_TOKENS,
     AUTO_CONTEXT_PRUNE_FALLBACK_TOKENS,
     model_max_input_tokens,
 )
@@ -94,22 +96,33 @@ AUTO_PRUNE_KEEP_RECENT_TOOL_RESULTS = 8
 # verdict is what makes a long session repeat the same check dozens of times.
 AUTO_PRUNE_PREVIEW_HEAD_CHARS = 240
 AUTO_PRUNE_PREVIEW_TAIL_CHARS = 240
+# Error/failure lines rescued from the removed middle. The verdict of a command
+# is often neither at the start nor at the end ("ERROR: cameraDegree undefined"
+# sits between 400 warning lines), and losing it left the model answering
+# "unconfirmed" and re-running the command.
+AUTO_PRUNE_MAX_KEPT_ERRORS = 8
 AUTO_PRUNE_MARKER = (
     "\n...[older tool result cleared automatically to keep this session fast; "
     "head and tail kept, re-run the tool if you need the middle]...\n"
+)
+_PRUNE_ERROR_RE = re.compile(
+    r"(error|failed|failure|exception|traceback|fatal|panic|not found|✗|"
+    r"\bFAILED\b|\bERROR\b|non-zero exit)",
+    re.IGNORECASE,
 )
 
 
 def prune_preview(text: str) -> str:
     """
-    Shrink a cleared tool result while keeping its start and its verdict.
+    Shrink a cleared tool result while keeping its start, its verdict and any
+    error lines from the middle.
 
     Args:
         text: Original tool-result text
 
     Returns:
-        The original text when it is already short, otherwise its head and tail
-        joined by AUTO_PRUNE_MARKER
+        The original text when it is already short, otherwise head, rescued
+        error/failure lines and tail joined by AUTO_PRUNE_MARKER
     """
     if not isinstance(text, str) or not text:
         return text
@@ -117,7 +130,27 @@ def prune_preview(text: str) -> str:
     tail_chars = AUTO_PRUNE_PREVIEW_TAIL_CHARS
     if len(text) <= head_chars + tail_chars:
         return text
-    return text[:head_chars] + AUTO_PRUNE_MARKER + text[-tail_chars:]
+
+    head = text[:head_chars]
+    tail = text[-tail_chars:]
+    middle = text[head_chars:-tail_chars]
+    rescued = [
+        line.strip()[:200]
+        for line in middle.splitlines()
+        if line.strip() and _PRUNE_ERROR_RE.search(line)
+    ][:AUTO_PRUNE_MAX_KEPT_ERRORS]
+
+    if not rescued:
+        return head + AUTO_PRUNE_MARKER + tail
+
+    omitted = len(text) - head_chars - tail_chars
+    return (
+        head
+        + f"\n...[{omitted} chars cleared; {len(rescued)} error/failure line(s) kept below]...\n"
+        + "\n".join(rescued)
+        + "\n"
+        + tail
+    )
 
 
 # ==================================================================================================
@@ -1631,6 +1664,8 @@ def auto_prune_threshold(model_id: Optional[str] = None) -> int:
     Returns:
         Threshold in estimated tokens
     """
+    if AUTO_CONTEXT_PRUNE_TOKENS > 0:
+        return AUTO_CONTEXT_PRUNE_TOKENS
     limit = model_max_input_tokens(model_id)
     if not limit:
         return AUTO_CONTEXT_PRUNE_FALLBACK_TOKENS

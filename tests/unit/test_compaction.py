@@ -374,3 +374,34 @@ class TestUnsummarisedMessagesAreCarried:
 
         assert calls["count"] == 1
         assert len(second.messages) == 8
+
+
+class TestSummarizerRescuesErrors:
+    """The summariser must see the error line, not only the first and last third."""
+
+    def test_error_from_the_middle_reaches_the_transcript(self):
+        """
+        What it does: Builds a long tool result with the error in the middle.
+        Purpose: The summary is asked to quote outcomes verbatim; it cannot if the
+                 line was cut before the summariser saw it.
+        """
+        from kiro.compaction import _summarizer_excerpt
+
+        text = "head\n" + "warning\n" * 400 + "ERROR: cameraDegree undefined\nexit=1\n" + "y" * 2000
+        excerpt = _summarizer_excerpt(text, 1500)
+
+        assert "ERROR: cameraDegree undefined" in excerpt
+        assert "exit=1" in excerpt
+        assert "error/failure line(s) kept below" in excerpt
+
+    def test_clean_text_keeps_the_plain_gap(self):
+        """
+        What it does: Shortens text without error lines.
+        Purpose: No misleading "errors kept" note.
+        """
+        from kiro.compaction import _summarizer_excerpt
+
+        excerpt = _summarizer_excerpt("a" * 5000, 1000)
+
+        assert "error/failure" not in excerpt
+        assert "chars omitted" in excerpt

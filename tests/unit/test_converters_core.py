@@ -7306,3 +7306,73 @@ class TestAnthropicToolResultStatus:
         ])
 
         assert results[0]["is_error"] is False
+
+
+class TestPrunePreviewRescuesErrors:
+    """
+    A cleared result must keep the error line even when it sits in the middle.
+
+    Real build logs put the verdict between hundreds of warnings, so head+tail
+    alone dropped it. The model then answered "unconfirmed" and re-ran the build.
+    """
+
+    @staticmethod
+    def _log() -> str:
+        return (
+            "hvigor: Compiling 312 files...\n"
+            + "warning: unused import\n" * 400
+            + "ERROR: cameraDegree undefined\nBUILD FAILED\n"
+            + "x" * 3000
+            + "\nexit=1"
+        )
+
+    def test_error_line_from_the_middle_is_kept(self):
+        """
+        What it does: Prunes a log whose error is neither first nor last.
+        Purpose: The verdict must survive the rewrite.
+        """
+        from kiro.converters_core import prune_preview
+
+        preview = prune_preview(self._log())
+
+        assert "ERROR: cameraDegree undefined" in preview
+        assert "BUILD FAILED" in preview
+        assert preview.rstrip().endswith("exit=1")
+
+    def test_rescued_block_is_labelled(self):
+        """
+        What it does: Checks the marker of a preview with rescued lines.
+        Purpose: The model must know the middle was removed and roughly how much.
+        """
+        from kiro.converters_core import prune_preview
+
+        preview = prune_preview(self._log())
+
+        assert "chars cleared" in preview
+        assert "error/failure line(s) kept below" in preview
+
+    def test_clean_output_uses_the_plain_marker(self):
+        """
+        What it does: Prunes a long output with no error lines.
+        Purpose: No fake "errors kept" note when there is nothing to rescue.
+        """
+        from kiro.converters_core import prune_preview
+
+        preview = prune_preview("start\n" + "data\n" * 2000 + "end")
+
+        assert "error/failure" not in preview
+        assert "cleared automatically" in preview
+
+    def test_rescued_lines_are_capped(self):
+        """
+        What it does: Prunes output where every middle line looks like an error.
+        Purpose: A pathological log must not defeat the budget it is rescued from.
+        """
+        from kiro.converters_core import AUTO_PRUNE_MAX_KEPT_ERRORS, prune_preview
+
+        text = "head\n" + "ERROR: failure\n" * 500 + "tail"
+        preview = prune_preview(text)
+
+        # Head and tail also contain such lines; the rescued block itself is capped.
+        assert f"{AUTO_PRUNE_MAX_KEPT_ERRORS} error/failure line(s) kept" in preview
+        assert preview.count("ERROR: failure") < 60

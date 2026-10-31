@@ -375,6 +375,10 @@ AUTO_CONTEXT_PRUNE_RATIO: float = 0.40
 # Threshold used when the model window is unknown (legacy behaviour).
 AUTO_CONTEXT_PRUNE_FALLBACK_TOKENS: int = 220_000
 
+# Explicit override, mainly for tests and for pinning a value on a machine with
+# a different latency budget. 0 means "derive from the model window".
+AUTO_CONTEXT_PRUNE_TOKENS: int = int(os.getenv("AUTO_PRUNE_TOKENS", "0") or 0)
+
 # Auto-compaction is a last resort. It asks the model to summarise old history
 # (a real upstream call that costs credits) and replaces the conversation
 # prefix, which invalidates the whole prompt cache. Keeping it well above the
